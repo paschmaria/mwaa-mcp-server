@@ -259,8 +259,12 @@ async def list_dags(
     Returns:
         Dictionary containing list of DAGs with their details
     """
+    # Convert string parameters to appropriate types
+    limit_int = int(limit) if limit is not None else 100
+    offset_int = int(offset) if offset is not None else 0
+
     return await tools.list_dags(
-        environment_name, limit, offset, tags, dag_id_pattern, only_active
+        environment_name, limit_int, offset_int, tags, dag_id_pattern, only_active
     )
 
 
@@ -362,8 +366,16 @@ async def list_dag_runs(
     Returns:
         Dictionary containing list of DAG runs
     """
+    # Convert string parameters to appropriate types
+    limit_int = int(limit) if limit is not None else 100
+
     return await tools.list_dag_runs(
-        environment_name, dag_id, limit, state, execution_date_gte, execution_date_lte
+        environment_name,
+        dag_id,
+        limit_int,
+        state,
+        execution_date_gte,
+        execution_date_lte,
     )
 
 
@@ -408,8 +420,11 @@ async def get_task_logs(
     Returns:
         Dictionary containing task logs
     """
+    # Convert string parameters to appropriate types
+    task_try_number_int = int(task_try_number) if task_try_number is not None else None
+
     return await tools.get_task_logs(
-        environment_name, dag_id, dag_run_id, task_id, task_try_number
+        environment_name, dag_id, dag_run_id, task_id, task_try_number_int
     )
 
 
@@ -429,7 +444,11 @@ async def list_connections(
     Returns:
         Dictionary containing list of connections
     """
-    return await tools.list_connections(environment_name, limit, offset)
+    # Convert string parameters to appropriate types
+    limit_int = int(limit) if limit is not None else 100
+    offset_int = int(offset) if offset is not None else 0
+
+    return await tools.list_connections(environment_name, limit_int, offset_int)
 
 
 @mcp.tool(name="list_variables")
@@ -448,7 +467,11 @@ async def list_variables(
     Returns:
         Dictionary containing list of variables
     """
-    return await tools.list_variables(environment_name, limit, offset)
+    # Convert string parameters to appropriate types
+    limit_int = int(limit) if limit is not None else 100
+    offset_int = int(offset) if offset is not None else 0
+
+    return await tools.list_variables(environment_name, limit_int, offset_int)
 
 
 @mcp.tool(name="get_import_errors")
@@ -467,7 +490,11 @@ async def get_import_errors(
     Returns:
         Dictionary containing list of import errors
     """
-    return await tools.get_import_errors(environment_name, limit, offset)
+    # Convert string parameters to appropriate types
+    limit_int = int(limit) if limit is not None else 100
+    offset_int = int(offset) if offset is not None else 0
+
+    return await tools.get_import_errors(environment_name, limit_int, offset_int)
 
 
 # Expert Guidance Tools

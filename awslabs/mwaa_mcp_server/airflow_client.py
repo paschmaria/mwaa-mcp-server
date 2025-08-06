@@ -4,7 +4,6 @@ import json
 import base64
 from typing import Any, Dict, List, Optional
 from datetime import datetime
-from urllib.parse import urlencode
 
 import httpx
 from loguru import logger
@@ -15,7 +14,7 @@ class AirflowClient:
 
     def __init__(self, webserver_hostname: str, cli_token: str):
         """Initialize Airflow client.
-        
+
         Args:
             webserver_hostname: MWAA webserver hostname
             cli_token: CLI token for authentication
@@ -41,7 +40,7 @@ class AirflowClient:
     ) -> Dict[str, Any]:
         """Make an authenticated request to Airflow API."""
         url = f"{self.base_url}{endpoint}"
-        
+
         try:
             response = await self.client.request(
                 method=method,
@@ -72,6 +71,30 @@ class AirflowClient:
             
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
+
+            # Special handling for 401 errors
+            if e.response.status_code == 401:
+                logger.error("Authentication failed. Possible causes:")
+                logger.error("1. CLI token has expired (tokens expire after 12 hours)")
+                logger.error("2. Token format is incorrect")
+                logger.error("3. MWAA environment is not accessible")
+                logger.error(f"4. Current session token: {self.session_token[:20]}...")
+
+                return {
+                    "error": f"HTTP {e.response.status_code}",
+                    "message": e.response.text,
+                    "debug_info": {
+                        "session_token_length": len(self.session_token),
+                        "session_token_prefix": (
+                            self.session_token[:20] + "..."
+                            if len(self.session_token) > 20
+                            else self.session_token
+                        ),
+                        "cli_token_length": len(self.cli_token),
+                        "base_url": self.base_url,
+                    },
+                }
+
             return {
                 "error": f"HTTP {e.response.status_code}",
                 "message": e.response.text,
@@ -95,12 +118,12 @@ class AirflowClient:
             "offset": offset,
             "only_active": only_active,
         }
-        
+
         if tags:
             params["tags"] = ",".join(tags)
         if dag_id_pattern:
             params["dag_id_pattern"] = dag_id_pattern
-            
+
         return await self._request("GET", "/dags", params=params)
 
     async def get_dag(self, dag_id: str) -> Dict[str, Any]:
@@ -125,18 +148,18 @@ class AirflowClient:
     ) -> Dict[str, Any]:
         """Trigger a DAG run."""
         data = {}
-        
+
         if dag_run_id:
             data["dag_run_id"] = dag_run_id
         else:
             # Generate a unique run ID
             data["dag_run_id"] = f"manual__{datetime.utcnow().isoformat()}"
-            
+
         if conf:
             data["conf"] = conf
         if note:
             data["note"] = note
-            
+
         return await self._request("POST", f"/dags/{dag_id}/dagRuns", json_data=data)
 
     async def get_dag_run(self, dag_id: str, dag_run_id: str) -> Dict[str, Any]:
@@ -153,14 +176,14 @@ class AirflowClient:
     ) -> Dict[str, Any]:
         """List DAG runs."""
         params = {"limit": limit}
-        
+
         if state:
             params["state"] = state
         if execution_date_gte:
             params["execution_date_gte"] = execution_date_gte
         if execution_date_lte:
             params["execution_date_lte"] = execution_date_lte
-            
+
         return await self._request("GET", f"/dags/{dag_id}/dagRuns", params=params)
 
     # Task Instances
@@ -181,33 +204,29 @@ class AirflowClient:
     ) -> Dict[str, Any]:
         """Get task logs."""
         endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs"
-        
-        params = {}
         if task_try_number is not None:
-            params["try_number"] = task_try_number
-            
-        return await self._request("GET", endpoint, params=params)
+            endpoint += f"/{task_try_number}"
+        return await self._request("GET", endpoint)
 
     # Connections and Variables
     async def list_connections(
         self, limit: Optional[int] = 100, offset: Optional[int] = 0
     ) -> Dict[str, Any]:
-        """List Airflow connections."""
+        """List connections."""
         params = {"limit": limit, "offset": offset}
         return await self._request("GET", "/connections", params=params)
 
     async def list_variables(
         self, limit: Optional[int] = 100, offset: Optional[int] = 0
     ) -> Dict[str, Any]:
-        """List Airflow variables."""
+        """List variables."""
         params = {"limit": limit, "offset": offset}
         return await self._request("GET", "/variables", params=params)
 
-    # Import Errors
     async def get_import_errors(
         self, limit: Optional[int] = 100, offset: Optional[int] = 0
     ) -> Dict[str, Any]:
-        """Get DAG import errors."""
+        """Get import errors."""
         params = {"limit": limit, "offset": offset}
         return await self._request("GET", "/importErrors", params=params)
 
