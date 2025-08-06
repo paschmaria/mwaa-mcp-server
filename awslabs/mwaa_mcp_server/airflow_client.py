@@ -22,27 +22,15 @@ class AirflowClient:
         """
         self.base_url = f"https://{webserver_hostname}/api/v1"
         self.cli_token = cli_token
-        self.session_token = self._get_session_token()
         
         # Create HTTP client with auth headers
         self.client = httpx.AsyncClient(
             headers={
-                "Authorization": f"Bearer {self.session_token}",
+                "Authorization": f"Bearer {self.cli_token}",
                 "Content-Type": "application/json",
             },
             timeout=30.0,
         )
-
-    def _get_session_token(self) -> str:
-        """Convert CLI token to session token."""
-        # The CLI token is base64 encoded and contains the actual bearer token
-        decoded = base64.b64decode(self.cli_token).decode("utf-8")
-        # Extract the token from the decoded string
-        # Format is typically: "airflow webserver <token>"
-        parts = decoded.split()
-        if len(parts) >= 3 and parts[0] == "airflow" and parts[1] == "webserver":
-            return parts[2]
-        return decoded
 
     async def _request(
         self,
@@ -62,11 +50,25 @@ class AirflowClient:
                 json=json_data,
             )
             
+            # Add debug info for 401 errors
+            if response.status_code == 401:
+                return {
+                    "error": f"HTTP {response.status_code}",
+                    "message": response.text,
+                    "debug_info": {
+                        "session_token_length": len(self.cli_token),
+                        "session_token_prefix": self.cli_token[:20] + "...",
+                        "cli_token_length": len(self.cli_token),
+                        "base_url": self.base_url,
+                    }
+                }
+            
             response.raise_for_status()
             
+            # Return the actual response data
             if response.content:
                 return response.json()
-            return {"message": "Success"}
+            return {"message": "Success", "data": None}
             
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
