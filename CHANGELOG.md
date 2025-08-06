@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed response handling to return actual API data instead of just success messages
 - Added debug information for 401 authentication errors to help with troubleshooting
 
+### Removed
+- Removed unused `AirflowClient` class as the implementation now uses AWS SDK's `invoke_rest_api` method directly
+
 ## [1.0.0] - 2025-01-31
 
 ### Added
