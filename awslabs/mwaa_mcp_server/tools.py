@@ -286,7 +286,7 @@ class MWAATools:
     ) -> Dict[str, Any]:
         """Get DAG source code via Airflow API."""
         return self._invoke_airflow_api(
-            environment_name, "GET", f"/dagSources/{dag_id}"
+            environment_name, "GET", f"/dags/{dag_id}/dagSource"
         )
 
     async def trigger_dag_run(
@@ -369,9 +369,11 @@ class MWAATools:
         task_try_number: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Get task logs via Airflow API."""
-        endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs"
-        if task_try_number is not None:
-            endpoint += f"/{task_try_number}"
+        # Default to try number 1 if not specified
+        if task_try_number is None:
+            task_try_number = 1
+
+        endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs/{task_try_number}"
         return self._invoke_airflow_api(environment_name, "GET", endpoint)
 
     async def list_connections(
@@ -407,5 +409,5 @@ class MWAATools:
         """Get import errors via Airflow API."""
         params = {"limit": limit, "offset": offset}
         return self._invoke_airflow_api(
-            environment_name, "GET", "/importErrors", params=params
+            environment_name, "GET", "/dags/importErrors", params=params
         )
