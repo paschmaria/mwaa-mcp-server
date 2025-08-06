@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
 """MWAA MCP Server - Model Context Protocol server for Amazon Managed Workflows for Apache Airflow."""
 
 import os
@@ -19,11 +17,12 @@ logger.add(sys.stderr, level=os.getenv("FASTMCP_LOG_LEVEL", "ERROR"))
 # Initialize the MCP server
 mcp = FastMCP(
     name="mwaa-mcp-server",
-    description="Model Context Protocol server for Amazon Managed Workflows for Apache Airflow (MWAA)",
+    instructions="Model Context Protocol server for Amazon Managed Workflows for Apache Airflow (MWAA)",
 )
 
 # Initialize tools
 tools = MWAATools()
+
 
 # Environment Management Tools
 @mcp.tool(name="list_environments")
@@ -31,10 +30,10 @@ async def list_environments(
     max_results: Optional[int] = None,
 ) -> Dict[str, Any]:
     """List all MWAA environments in the current AWS account and region.
-    
+
     Args:
         max_results: Maximum number of environments to return (1-25)
-    
+
     Returns:
         Dictionary containing list of environment names and metadata
     """
@@ -46,10 +45,10 @@ async def get_environment(
     name: str,
 ) -> Dict[str, Any]:
     """Get detailed information about a specific MWAA environment.
-    
+
     Args:
         name: The name of the MWAA environment
-    
+
     Returns:
         Dictionary containing environment details including configuration,
         status, endpoints, and other metadata
@@ -79,7 +78,7 @@ async def create_environment(
     startup_script_s3_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new MWAA environment.
-    
+
     Args:
         name: Environment name
         dag_s3_path: S3 path to DAGs folder (e.g., s3://bucket/dags)
@@ -99,7 +98,7 @@ async def create_environment(
         requirements_s3_path: S3 path to requirements.txt
         plugins_s3_path: S3 path to plugins.zip
         startup_script_s3_path: S3 path to startup script
-    
+
     Returns:
         Dictionary containing the ARN of the created environment
     """
@@ -146,9 +145,9 @@ async def update_environment(
     startup_script_s3_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Update an existing MWAA environment configuration.
-    
+
     Only provide the parameters you want to change.
-    
+
     Args:
         name: Environment name
         dag_s3_path: S3 path to DAGs folder
@@ -167,7 +166,7 @@ async def update_environment(
         requirements_s3_path: Path to requirements.txt
         plugins_s3_path: Path to plugins.zip
         startup_script_s3_path: Path to startup script
-    
+
     Returns:
         Dictionary containing the environment ARN
     """
@@ -197,10 +196,10 @@ async def delete_environment(
     name: str,
 ) -> Dict[str, Any]:
     """Delete an MWAA environment.
-    
+
     Args:
         name: The name of the environment to delete
-    
+
     Returns:
         Dictionary with deletion confirmation
     """
@@ -212,10 +211,10 @@ async def create_cli_token(
     name: str,
 ) -> Dict[str, Any]:
     """Create a CLI token for executing Airflow CLI commands.
-    
+
     Args:
         name: The name of the MWAA environment
-    
+
     Returns:
         Dictionary containing the CLI token and webserver hostname
     """
@@ -227,10 +226,10 @@ async def create_web_login_token(
     name: str,
 ) -> Dict[str, Any]:
     """Create a web login token for accessing the Airflow UI.
-    
+
     Args:
         name: The name of the MWAA environment
-    
+
     Returns:
         Dictionary containing the web token, webserver hostname, and IAM identity
     """
@@ -248,7 +247,7 @@ async def list_dags(
     only_active: Optional[bool] = True,
 ) -> Dict[str, Any]:
     """List all DAGs in an MWAA environment.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         limit: Number of items to return (max 100)
@@ -256,7 +255,7 @@ async def list_dags(
         tags: Filter by DAG tags
         dag_id_pattern: Filter by DAG ID pattern (supports % wildcards)
         only_active: Only return active DAGs
-    
+
     Returns:
         Dictionary containing list of DAGs with their details
     """
@@ -271,11 +270,11 @@ async def get_dag(
     dag_id: str,
 ) -> Dict[str, Any]:
     """Get details about a specific DAG.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID
-    
+
     Returns:
         Dictionary containing DAG details including schedule, tags, and state
     """
@@ -288,11 +287,11 @@ async def get_dag_source(
     dag_id: str,
 ) -> Dict[str, Any]:
     """Get the source code of a DAG.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID
-    
+
     Returns:
         Dictionary containing the DAG source code
     """
@@ -308,20 +307,18 @@ async def trigger_dag_run(
     note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Trigger a new DAG run.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID to trigger
         dag_run_id: Custom run ID (optional, will be auto-generated if not provided)
         conf: Configuration JSON for the DAG run
         note: Optional note for the DAG run
-    
+
     Returns:
         Dictionary containing the created DAG run details
     """
-    return await tools.trigger_dag_run(
-        environment_name, dag_id, dag_run_id, conf, note
-    )
+    return await tools.trigger_dag_run(environment_name, dag_id, dag_run_id, conf, note)
 
 
 @mcp.tool(name="get_dag_run")
@@ -331,12 +328,12 @@ async def get_dag_run(
     dag_run_id: str,
 ) -> Dict[str, Any]:
     """Get details about a specific DAG run.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID
         dag_run_id: The DAG run ID
-    
+
     Returns:
         Dictionary containing DAG run details including state and timing
     """
@@ -353,7 +350,7 @@ async def list_dag_runs(
     execution_date_lte: Optional[str] = None,
 ) -> Dict[str, Any]:
     """List DAG runs for a specific DAG.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID
@@ -361,7 +358,7 @@ async def list_dag_runs(
         state: Filter by state (queued, running, success, failed)
         execution_date_gte: Filter by execution date >= (ISO format)
         execution_date_lte: Filter by execution date <= (ISO format)
-    
+
     Returns:
         Dictionary containing list of DAG runs
     """
@@ -378,19 +375,17 @@ async def get_task_instance(
     task_id: str,
 ) -> Dict[str, Any]:
     """Get details about a specific task instance.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID
         dag_run_id: The DAG run ID
         task_id: The task ID
-    
+
     Returns:
         Dictionary containing task instance details
     """
-    return await tools.get_task_instance(
-        environment_name, dag_id, dag_run_id, task_id
-    )
+    return await tools.get_task_instance(environment_name, dag_id, dag_run_id, task_id)
 
 
 @mcp.tool(name="get_task_logs")
@@ -402,14 +397,14 @@ async def get_task_logs(
     task_try_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Get logs for a specific task instance.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID
         dag_run_id: The DAG run ID
         task_id: The task ID
         task_try_number: Specific try number (optional)
-    
+
     Returns:
         Dictionary containing task logs
     """
@@ -425,12 +420,12 @@ async def list_connections(
     offset: Optional[int] = 0,
 ) -> Dict[str, Any]:
     """List all Airflow connections in the environment.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         limit: Number of items to return
         offset: Number of items to skip
-    
+
     Returns:
         Dictionary containing list of connections
     """
@@ -444,12 +439,12 @@ async def list_variables(
     offset: Optional[int] = 0,
 ) -> Dict[str, Any]:
     """List all Airflow variables in the environment.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         limit: Number of items to return
         offset: Number of items to skip
-    
+
     Returns:
         Dictionary containing list of variables
     """
@@ -463,12 +458,12 @@ async def get_import_errors(
     offset: Optional[int] = 0,
 ) -> Dict[str, Any]:
     """Get DAG import errors in the environment.
-    
+
     Args:
         environment_name: Name of the MWAA environment
         limit: Number of items to return
         offset: Number of items to skip
-    
+
     Returns:
         Dictionary containing list of import errors
     """
@@ -479,7 +474,7 @@ async def get_import_errors(
 @mcp.tool(name="airflow_best_practices")
 async def airflow_best_practices() -> str:
     """Get MWAA and Apache Airflow best practices guidance.
-    
+
     Returns comprehensive guidance on:
     - DAG design patterns
     - Performance optimization
@@ -494,7 +489,7 @@ async def airflow_best_practices() -> str:
 @mcp.tool(name="dag_design_guidance")
 async def dag_design_guidance() -> str:
     """Get detailed guidance on designing efficient Airflow DAGs.
-    
+
     Returns expert guidance on:
     - Task dependencies and parallelism
     - Dynamic DAG generation
@@ -514,7 +509,7 @@ def main():
         description="MWAA MCP Server - Model Context Protocol server for Amazon MWAA"
     )
     parser.add_argument("--sse", action="store_true", help="Use SSE transport")
-    
+
     args = parser.parse_args()
 
     # Run server with appropriate transport

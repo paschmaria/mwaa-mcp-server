@@ -10,12 +10,14 @@ This MCP server provides comprehensive tools for managing MWAA environments and 
 ## Features
 
 ### MWAA Environment Management
+
 - **List and describe environments** - View all MWAA environments and their configurations
 - **Create and update environments** - Deploy new environments or modify existing ones
 - **Delete environments** - Clean up unused environments
 - **Generate access tokens** - Create CLI and web UI access tokens
 
 ### Airflow Operations
+
 - **DAG Management** - List, view, and trigger DAGs
 - **DAG Runs** - Monitor and manage workflow executions
 - **Task Instances** - Track individual task status and logs
@@ -23,44 +25,17 @@ This MCP server provides comprehensive tools for managing MWAA environments and 
 - **Import Errors** - Diagnose DAG parsing issues
 
 ### Expert Guidance
+
 - **Best Practices** - Get MWAA and Airflow best practices
 - **DAG Design** - Expert guidance on workflow design patterns
 
+## Prerequisites
+
+- **AWS Credentials**: Configure AWS credentials with appropriate permissions for MWAA
+- **Python**: Python 3.10 or higher
+- **uv**: Install uv for package management (recommended)
+
 ## Installation
-
-### Prerequisites
-
-1. **AWS Credentials**: Configure AWS credentials with appropriate permissions for MWAA
-2. **Python**: Python 3.10 or higher
-3. **uv**: Install uv for package management (recommended)
-
-### Quick Start
-
-#### Using uvx (Recommended)
-
-```bash
-# Run directly without installation
-uvx awslabs.mwaa-mcp-server
-
-# Or install globally
-uv tool install awslabs.mwaa-mcp-server
-```
-
-#### Using pip
-
-```bash
-pip install awslabs.mwaa-mcp-server
-```
-
-#### Using Docker
-
-```bash
-docker run -it --rm \
-  -e AWS_PROFILE=default \
-  -e AWS_REGION=us-east-1 \
-  -v ~/.aws:/root/.aws:ro \
-  awslabs/mwaa-mcp-server
-```
 
 ## Configuration
 
@@ -85,13 +60,44 @@ Add to your MCP client configuration file:
   "mcpServers": {
     "mwaa": {
       "command": "uvx",
-      "args": ["awslabs.mwaa-mcp-server"],
+      "args": ["path/to/mwaa-mcp-server"],
       "env": {
         "AWS_PROFILE": "your-profile",
         "AWS_REGION": "us-east-1",
         "MWAA_MCP_READONLY": "false",
         "FASTMCP_LOG_LEVEL": "ERROR"
       }
+    }
+  }
+}
+```
+
+or docker after a successful `docker build -t mwaa-mcp-server .`:
+
+```json
+{
+  "mcpServers": {
+    "mwaa": {
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "--interactive",
+        "--env",
+        "AWS_PROFILE=your-profile",
+        "--env",
+        "AWS_REGION=us-east-1",
+        "--env",
+        "MWAA_MCP_READONLY=false",
+        "--env",
+        "FASTMCP_LOG_LEVEL=ERROR",
+        "-v",
+        "~/.aws:/home/app/.aws:ro",
+        "mwaa-mcp-server:latest"
+      ],
+      "env": {},
+      "disabled": false,
+      "autoApprove": []
     }
   }
 }
@@ -143,6 +149,7 @@ Refer to your MCP client's documentation for configuration details.
 The IAM user or role needs the following permissions:
 
 ### MWAA Permissions
+
 ```json
 {
   "Version": "2012-10-17",
@@ -162,6 +169,7 @@ The IAM user or role needs the following permissions:
 ```
 
 ### Additional Permissions for Write Operations
+
 ```json
 {
   "Effect": "Allow",
@@ -180,15 +188,18 @@ The IAM user or role needs the following permissions:
 
 ```bash
 # Clone the repository
-git clone https://github.com/awslabs/mcp.git
-cd mcp/src/mwaa-mcp-server
+git clone https://github.com/paschmaria/mwaa-mcp-server.git
+cd mwaa-mcp-server
 
-# Create virtual environment
+# Create virtual environment and install dependencies
 uv venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install in development mode
+# Install in development mode with all dev dependencies
 uv sync --dev
+
+# Or using pip
+pip install -r requirements-dev.txt
 ```
 
 ### Running Tests
@@ -208,13 +219,16 @@ pytest tests/test_tools.py::test_list_environments
 
 ```bash
 # Build image
-docker build -t awslabs/mwaa-mcp-server .
+docker build -t mwaa-mcp-server .
 
-# Run container
+# Run container with all environment variables
 docker run -it --rm \
   -e AWS_PROFILE=default \
-  -v ~/.aws:/root/.aws:ro \
-  awslabs/mwaa-mcp-server
+  -e AWS_REGION=us-east-1 \
+  -e MWAA_MCP_READONLY=false \
+  -e FASTMCP_LOG_LEVEL=ERROR \
+  -v ~/.aws:/home/app/.aws:ro \
+  mwaa-mcp-server
 ```
 
 ## Troubleshooting
@@ -236,15 +250,6 @@ docker run -it --rm \
    - Check CloudWatch logs for detailed error messages
    - Verify all dependencies are in requirements.txt
 
-### Debug Mode
-
-Enable debug logging for troubleshooting:
-
-```bash
-export FASTMCP_LOG_LEVEL=DEBUG
-uvx awslabs.mwaa-mcp-server
-```
-
 ## Contributing
 
 We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
@@ -252,13 +257,3 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## Support
-
-- 📚 [Documentation](https://awslabs.github.io/mcp/servers/mwaa-mcp-server/)
-- 🐛 [Issue Tracker](https://github.com/awslabs/mcp/issues)
-- 💬 [Discussions](https://github.com/awslabs/mcp/discussions)
-
-## Acknowledgments
-
-This MCP server is part of the [AWS Labs MCP Servers](https://github.com/awslabs/mcp) project, bringing AWS best practices to AI-assisted development.

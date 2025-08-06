@@ -1,10 +1,7 @@
 """MWAA MCP Server Tools - Implementation of MWAA operations."""
 
 import os
-import json
-import base64
 from typing import Any, Dict, List, Optional
-from datetime import datetime
 
 import boto3
 import httpx

@@ -1,0 +1,9 @@
+.venv/
+.pytest_cache/
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+.vscode/
+.DS_Store
+.env
+mwaa-mcp-wrapper.sh
