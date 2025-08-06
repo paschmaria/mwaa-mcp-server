@@ -57,20 +57,7 @@ class MWAATools:
 
             response = self.mwaa_client.invoke_rest_api(**params)
 
-            # Parse the response
-            if response.get("Body"):
-                import json
-
-                try:
-                    return json.loads(response["Body"].read().decode("utf-8"))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    return {
-                        "content": response["Body"]
-                        .read()
-                        .decode("utf-8", errors="ignore")
-                    }
-
-            return {"message": "Success"}
+            return response
 
         except Exception as e:
             logger.error(f"Error invoking Airflow API {method} {path}: {e}")
