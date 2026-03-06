@@ -1,81 +1,87 @@
 """MWAA MCP Server Tools - Implementation of MWAA operations."""
 
+import json
+import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import boto3
-from loguru import logger
-from botocore.exceptions import ClientError, BotoCoreError
+from botocore.exceptions import BotoCoreError, ClientError
+
+logger = logging.getLogger(__name__)
 
 
 class MWAATools:
     """Tools for interacting with Amazon MWAA."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize MWAA tools with AWS clients."""
         self.region = os.getenv("AWS_REGION", "us-east-1")
         self.readonly = os.getenv("MWAA_MCP_READONLY", "true").lower() == "true"
 
         self.mwaa_client = boto3.client("mwaa", region_name=self.region)
 
-        logger.info(f"Initialized MWAA tools for region: {self.region}")
+        logger.info("Initialized MWAA tools for region: %s", self.region)
         if self.readonly:
             logger.info("Running in read-only mode")
 
     def _check_readonly(self, operation: str) -> None:
         """Check if operation is allowed in read-only mode."""
         if self.readonly:
-            raise PermissionError(
-                f"Operation '{operation}' not allowed in read-only mode"
-            )
+            raise PermissionError(f"Operation '{operation}' not allowed in read-only mode")
 
     def _invoke_airflow_api(
-        self, environment_name: str, method: str, path: str, **kwargs
+        self, environment_name: str, method: str, path: str, **kwargs: Any
     ) -> Dict[str, Any]:
         """Invoke Airflow REST API using MWAA client."""
         try:
-            # Prepare the request parameters
-            params = {
+            params: Dict[str, Any] = {
                 "Name": environment_name,
                 "Method": method.upper(),
                 "Path": path,
             }
 
-            # Add query parameters if provided
             if "params" in kwargs:
-                query_string = "&".join(
-                    [f"{k}={v}" for k, v in kwargs["params"].items()]
-                )
+                processed_params: Dict[str, Any] = {}
+                for k, v in kwargs["params"].items():
+                    if v is not None:
+                        if isinstance(v, str) and v.isdigit():
+                            processed_params[k] = int(v)
+                        elif isinstance(v, str) and v.lower() in ["true", "false"]:
+                            processed_params[k] = v.lower() == "true"
+                        elif isinstance(v, str) and v.startswith("[") and v.endswith("]"):
+                            try:
+                                processed_params[k] = json.loads(v)
+                            except json.JSONDecodeError:
+                                processed_params[k] = v
+                        else:
+                            processed_params[k] = v
+
+                query_string = "&".join([f"{k}={v}" for k, v in processed_params.items()])
                 if query_string:
                     params["Path"] = f"{path}?{query_string}"
 
-            # Add JSON body if provided
             if "json_data" in kwargs:
-                import json
-
                 params["Body"] = json.dumps(kwargs["json_data"])
 
             response = self.mwaa_client.invoke_rest_api(**params)
-
             return response
 
         except Exception as e:
-            logger.error(f"Error invoking Airflow API {method} {path}: {e}")
+            logger.error("Error invoking Airflow API %s %s: %s", method, path, e)
             return {"error": str(e)}
 
     # Environment Management Methods
-    async def list_environments(
-        self, max_results: Optional[int] = None
-    ) -> Dict[str, Any]:
+    async def list_environments(self, max_results: Optional[int] = None) -> Dict[str, Any]:
         """List MWAA environments."""
         try:
-            kwargs = {}
+            kwargs: Dict[str, Any] = {}
             if max_results:
                 kwargs["MaxResults"] = min(max_results, 25)
 
             response = self.mwaa_client.list_environments(**kwargs)
 
-            # Get details for each environment
             environments = []
             for env_name in response.get("Environments", []):
                 try:
@@ -85,15 +91,11 @@ class MWAATools:
                             "Name": env_name,
                             "Status": env_details.get("Environment", {}).get("Status"),
                             "Arn": env_details.get("Environment", {}).get("Arn"),
-                            "CreatedAt": env_details.get("Environment", {}).get(
-                                "CreatedAt"
-                            ),
+                            "CreatedAt": env_details.get("Environment", {}).get("CreatedAt"),
                         }
                     )
                 except Exception as e:
-                    logger.error(
-                        f"Error getting details for environment {env_name}: {e}"
-                    )
+                    logger.error("Error getting details for environment %s: %s", env_name, e)
                     environments.append(
                         {
                             "Name": env_name,
@@ -108,7 +110,7 @@ class MWAATools:
             }
 
         except (ClientError, BotoCoreError) as e:
-            logger.error(f"Error listing environments: {e}")
+            logger.error("Error listing environments: %s", e)
             return {"error": str(e)}
 
     async def get_environment(self, name: str) -> Dict[str, Any]:
@@ -116,31 +118,26 @@ class MWAATools:
         try:
             response = self.mwaa_client.get_environment(Name=name)
 
-            # Convert datetime objects to strings
             env = response.get("Environment", {})
             if "CreatedAt" in env:
                 env["CreatedAt"] = env["CreatedAt"].isoformat()
             if "LastUpdate" in env and "CreatedAt" in env["LastUpdate"]:
-                env["LastUpdate"]["CreatedAt"] = env["LastUpdate"][
-                    "CreatedAt"
-                ].isoformat()
+                env["LastUpdate"]["CreatedAt"] = env["LastUpdate"]["CreatedAt"].isoformat()
 
             return {"Environment": env}
 
         except (ClientError, BotoCoreError) as e:
-            logger.error(f"Error getting environment {name}: {e}")
+            logger.error("Error getting environment %s: %s", name, e)
             return {"error": str(e)}
 
-    async def create_environment(self, **kwargs) -> Dict[str, Any]:
+    async def create_environment(self, **kwargs: Any) -> Dict[str, Any]:
         """Create a new MWAA environment."""
         self._check_readonly("create_environment")
 
         try:
-            # Filter out None values
             params = {k: v for k, v in kwargs.items() if v is not None}
 
-            # Convert parameter names to PascalCase for boto3
-            boto_params = {}
+            boto_params: Dict[str, Any] = {}
             param_mapping = {
                 "name": "Name",
                 "dag_s3_path": "DagS3Path",
@@ -170,19 +167,17 @@ class MWAATools:
             return {"Arn": response["Arn"]}
 
         except (ClientError, BotoCoreError) as e:
-            logger.error(f"Error creating environment: {e}")
+            logger.error("Error creating environment: %s", e)
             return {"error": str(e)}
 
-    async def update_environment(self, **kwargs) -> Dict[str, Any]:
+    async def update_environment(self, **kwargs: Any) -> Dict[str, Any]:
         """Update an existing MWAA environment."""
         self._check_readonly("update_environment")
 
         try:
-            # Filter out None values
             params = {k: v for k, v in kwargs.items() if v is not None}
 
-            # Convert parameter names to PascalCase for boto3
-            boto_params = {}
+            boto_params: Dict[str, Any] = {}
             param_mapping = {
                 "name": "Name",
                 "dag_s3_path": "DagS3Path",
@@ -211,7 +206,7 @@ class MWAATools:
             return {"Arn": response["Arn"]}
 
         except (ClientError, BotoCoreError) as e:
-            logger.error(f"Error updating environment: {e}")
+            logger.error("Error updating environment: %s", e)
             return {"error": str(e)}
 
     async def delete_environment(self, name: str) -> Dict[str, Any]:
@@ -223,7 +218,7 @@ class MWAATools:
             return {"message": f"Environment {name} deleted successfully"}
 
         except (ClientError, BotoCoreError) as e:
-            logger.error(f"Error deleting environment {name}: {e}")
+            logger.error("Error deleting environment %s: %s", name, e)
             return {"error": str(e)}
 
     async def create_cli_token(self, name: str) -> Dict[str, Any]:
@@ -236,7 +231,7 @@ class MWAATools:
             }
 
         except (ClientError, BotoCoreError) as e:
-            logger.error(f"Error creating CLI token for {name}: {e}")
+            logger.error("Error creating CLI token for %s: %s", name, e)
             return {"error": str(e)}
 
     async def create_web_login_token(self, name: str) -> Dict[str, Any]:
@@ -250,7 +245,7 @@ class MWAATools:
             }
 
         except (ClientError, BotoCoreError) as e:
-            logger.error(f"Error creating web login token for {name}: {e}")
+            logger.error("Error creating web login token for %s: %s", name, e)
             return {"error": str(e)}
 
     # Airflow API Methods
@@ -264,7 +259,7 @@ class MWAATools:
         only_active: Optional[bool] = True,
     ) -> Dict[str, Any]:
         """List DAGs via Airflow API."""
-        params = {
+        params: Dict[str, Any] = {
             "limit": limit,
             "offset": offset,
             "only_active": only_active,
@@ -281,9 +276,7 @@ class MWAATools:
         """Get DAG details via Airflow API."""
         return self._invoke_airflow_api(environment_name, "GET", f"/dags/{dag_id}")
 
-    async def get_dag_source(
-        self, environment_name: str, dag_id: str
-    ) -> Dict[str, Any]:
+    async def get_dag_source(self, environment_name: str, dag_id: str) -> Dict[str, Any]:
         """Get DAG source code via Airflow API."""
         return self._invoke_airflow_api(
             environment_name, "GET", f"/dags/{dag_id}/dagSource"
@@ -300,15 +293,12 @@ class MWAATools:
         """Trigger a DAG run via Airflow API."""
         self._check_readonly("trigger_dag_run")
 
-        data = {}
+        data: Dict[str, Any] = {}
 
         if dag_run_id:
             data["dag_run_id"] = dag_run_id
         else:
-            # Generate a unique run ID
-            from datetime import datetime
-
-            data["dag_run_id"] = f"manual__{datetime.utcnow().isoformat()}"
+            data["dag_run_id"] = f"manual__{datetime.now(timezone.utc).isoformat()}"
 
         if conf:
             data["conf"] = conf
@@ -337,7 +327,7 @@ class MWAATools:
         execution_date_lte: Optional[str] = None,
     ) -> Dict[str, Any]:
         """List DAG runs via Airflow API."""
-        params = {"limit": limit}
+        params: Dict[str, Any] = {"limit": limit}
 
         if state:
             params["state"] = state
@@ -369,11 +359,13 @@ class MWAATools:
         task_try_number: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Get task logs via Airflow API."""
-        # Default to try number 1 if not specified
         if task_try_number is None:
             task_try_number = 1
 
-        endpoint = f"/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}/logs/{task_try_number}"
+        endpoint = (
+            f"/dags/{dag_id}/dagRuns/{dag_run_id}"
+            f"/taskInstances/{task_id}/logs/{task_try_number}"
+        )
         return self._invoke_airflow_api(environment_name, "GET", endpoint)
 
     async def list_connections(
@@ -383,7 +375,7 @@ class MWAATools:
         offset: Optional[int] = 0,
     ) -> Dict[str, Any]:
         """List connections via Airflow API."""
-        params = {"limit": limit, "offset": offset}
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
         return self._invoke_airflow_api(
             environment_name, "GET", "/connections", params=params
         )
@@ -395,7 +387,7 @@ class MWAATools:
         offset: Optional[int] = 0,
     ) -> Dict[str, Any]:
         """List variables via Airflow API."""
-        params = {"limit": limit, "offset": offset}
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
         return self._invoke_airflow_api(
             environment_name, "GET", "/variables", params=params
         )
@@ -407,7 +399,7 @@ class MWAATools:
         offset: Optional[int] = 0,
     ) -> Dict[str, Any]:
         """Get import errors via Airflow API."""
-        params = {"limit": limit, "offset": offset}
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
         return self._invoke_airflow_api(
             environment_name, "GET", "/dags/importErrors", params=params
         )

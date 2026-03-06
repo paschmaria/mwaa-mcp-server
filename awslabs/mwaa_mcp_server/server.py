@@ -1,18 +1,17 @@
-#!/usr/bin/env python3
 """MWAA MCP Server - Model Context Protocol server for Amazon Managed Workflows for Apache Airflow."""
 
+import logging
 import os
-import sys
 from typing import Any, Dict, List, Optional
-from loguru import logger
+
 from fastmcp import FastMCP
 
 from .tools import MWAATools
 from .prompts import AIRFLOW_BEST_PRACTICES, DAG_DESIGN_GUIDANCE
 
 # Set up logging
-logger.remove()
-logger.add(sys.stderr, level=os.getenv("FASTMCP_LOG_LEVEL", "ERROR"))
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=getattr(logging, os.getenv("FASTMCP_LOG_LEVEL", "ERROR")))
 
 # Initialize the MCP server
 mcp = FastMCP(
@@ -37,7 +36,8 @@ async def list_environments(
     Returns:
         Dictionary containing list of environment names and metadata
     """
-    return await tools.list_environments(max_results)
+    max_results_int = int(max_results) if max_results is not None else None
+    return await tools.list_environments(max_results_int)
 
 
 @mcp.tool(name="get_environment")
@@ -102,6 +102,10 @@ async def create_environment(
     Returns:
         Dictionary containing the ARN of the created environment
     """
+    max_workers_int = int(max_workers) if max_workers is not None else None
+    min_workers_int = int(min_workers) if min_workers is not None else None
+    schedulers_int = int(schedulers) if schedulers is not None else None
+
     return await tools.create_environment(
         name=name,
         dag_s3_path=dag_s3_path,
@@ -110,9 +114,9 @@ async def create_environment(
         source_bucket_arn=source_bucket_arn,
         airflow_version=airflow_version,
         environment_class=environment_class,
-        max_workers=max_workers,
-        min_workers=min_workers,
-        schedulers=schedulers,
+        max_workers=max_workers_int,
+        min_workers=min_workers_int,
+        schedulers=schedulers_int,
         webserver_access_mode=webserver_access_mode,
         weekly_maintenance_window_start=weekly_maintenance_window_start,
         tags=tags,
@@ -170,6 +174,10 @@ async def update_environment(
     Returns:
         Dictionary containing the environment ARN
     """
+    max_workers_int = int(max_workers) if max_workers is not None else None
+    min_workers_int = int(min_workers) if min_workers is not None else None
+    schedulers_int = int(schedulers) if schedulers is not None else None
+
     return await tools.update_environment(
         name=name,
         dag_s3_path=dag_s3_path,
@@ -178,9 +186,9 @@ async def update_environment(
         source_bucket_arn=source_bucket_arn,
         airflow_version=airflow_version,
         environment_class=environment_class,
-        max_workers=max_workers,
-        min_workers=min_workers,
-        schedulers=schedulers,
+        max_workers=max_workers_int,
+        min_workers=min_workers_int,
+        schedulers=schedulers_int,
         webserver_access_mode=webserver_access_mode,
         weekly_maintenance_window_start=weekly_maintenance_window_start,
         airflow_configuration_options=airflow_configuration_options,
@@ -259,7 +267,6 @@ async def list_dags(
     Returns:
         Dictionary containing list of DAGs with their details
     """
-    # Convert string parameters to appropriate types
     limit_int = int(limit) if limit is not None else 100
     offset_int = int(offset) if offset is not None else 0
 
@@ -366,7 +373,6 @@ async def list_dag_runs(
     Returns:
         Dictionary containing list of DAG runs
     """
-    # Convert string parameters to appropriate types
     limit_int = int(limit) if limit is not None else 100
 
     return await tools.list_dag_runs(
@@ -420,7 +426,6 @@ async def get_task_logs(
     Returns:
         Dictionary containing task logs
     """
-    # Convert string parameters to appropriate types
     task_try_number_int = int(task_try_number) if task_try_number is not None else None
 
     return await tools.get_task_logs(
@@ -444,7 +449,6 @@ async def list_connections(
     Returns:
         Dictionary containing list of connections
     """
-    # Convert string parameters to appropriate types
     limit_int = int(limit) if limit is not None else 100
     offset_int = int(offset) if offset is not None else 0
 
@@ -467,7 +471,6 @@ async def list_variables(
     Returns:
         Dictionary containing list of variables
     """
-    # Convert string parameters to appropriate types
     limit_int = int(limit) if limit is not None else 100
     offset_int = int(offset) if offset is not None else 0
 
@@ -490,7 +493,6 @@ async def get_import_errors(
     Returns:
         Dictionary containing list of import errors
     """
-    # Convert string parameters to appropriate types
     limit_int = int(limit) if limit is not None else 100
     offset_int = int(offset) if offset is not None else 0
 
@@ -526,26 +528,3 @@ async def dag_design_guidance() -> str:
     - Common pitfalls to avoid
     """
     return DAG_DESIGN_GUIDANCE
-
-
-def main():
-    """Run the MCP server."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="MWAA MCP Server - Model Context Protocol server for Amazon MWAA"
-    )
-    parser.add_argument("--sse", action="store_true", help="Use SSE transport")
-
-    args = parser.parse_args()
-
-    # Run server with appropriate transport
-    if args.sse:
-        logger.warning("SSE transport is deprecated. Using stdio transport instead.")
-        mcp.run()
-    else:
-        mcp.run()
-
-
-if __name__ == "__main__":
-    main()
