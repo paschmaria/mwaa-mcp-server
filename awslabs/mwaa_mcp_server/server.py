@@ -433,6 +433,83 @@ async def get_task_logs(
     )
 
 
+@mcp.tool(name="list_task_instances")
+async def list_task_instances(
+    environment_name: str,
+    dag_id: Optional[str] = None,
+    dag_run_id: Optional[str] = None,
+    start_date_gte: Optional[str] = None,
+    start_date_lte: Optional[str] = None,
+    end_date_gte: Optional[str] = None,
+    end_date_lte: Optional[str] = None,
+    execution_date_gte: Optional[str] = None,
+    execution_date_lte: Optional[str] = None,
+    state: Optional[List[str]] = None,
+    pool: Optional[str] = None,
+    queue: Optional[str] = None,
+    duration_gte: Optional[float] = None,
+    duration_lte: Optional[float] = None,
+    limit: Optional[int] = 100,
+    offset: Optional[int] = 0,
+) -> Dict[str, Any]:
+    """List task instances across DAGs with flexible time-based filtering.
+
+    This is the key tool for finding what tasks were running during a specific time window.
+    Supports wildcards: omit dag_id or dag_run_id to query across all DAGs/runs.
+
+    Args:
+        environment_name: Name of the MWAA environment
+        dag_id: Filter by DAG ID (optional - omit for all DAGs)
+        dag_run_id: Filter by DAG run ID (optional - omit for all runs)
+        start_date_gte: Tasks that started at or after this time (ISO format)
+        start_date_lte: Tasks that started at or before this time (ISO format)
+        end_date_gte: Tasks that ended at or after this time (ISO format)
+        end_date_lte: Tasks that ended at or before this time (ISO format)
+        execution_date_gte: Filter by execution/logical date >= (ISO format)
+        execution_date_lte: Filter by execution/logical date <= (ISO format)
+        state: Filter by state (queued, running, success, failed, etc.)
+        pool: Filter by pool name
+        queue: Filter by queue name
+        duration_gte: Filter by minimum duration in seconds
+        duration_lte: Filter by maximum duration in seconds
+        limit: Number of items to return (default 100)
+        offset: Number of items to skip for pagination
+
+    Returns:
+        Dictionary containing list of task instances with details
+
+    Example - Find tasks running between 2:30-2:40 AM:
+        list_task_instances(
+            environment_name="my-env",
+            start_date_lte="2024-01-15T02:40:00Z",  # Started before 2:40
+            end_date_gte="2024-01-15T02:30:00Z",   # Ended after 2:30 (or still running)
+        )
+    """
+    limit_int = int(limit) if limit is not None else 100
+    offset_int = int(offset) if offset is not None else 0
+    duration_gte_float = float(duration_gte) if duration_gte is not None else None
+    duration_lte_float = float(duration_lte) if duration_lte is not None else None
+
+    return await tools.list_task_instances(
+        environment_name=environment_name,
+        dag_id=dag_id,
+        dag_run_id=dag_run_id,
+        start_date_gte=start_date_gte,
+        start_date_lte=start_date_lte,
+        end_date_gte=end_date_gte,
+        end_date_lte=end_date_lte,
+        execution_date_gte=execution_date_gte,
+        execution_date_lte=execution_date_lte,
+        state=state,
+        pool=pool,
+        queue=queue,
+        duration_gte=duration_gte_float,
+        duration_lte=duration_lte_float,
+        limit=limit_int,
+        offset=offset_int,
+    )
+
+
 @mcp.tool(name="list_connections")
 async def list_connections(
     environment_name: str,

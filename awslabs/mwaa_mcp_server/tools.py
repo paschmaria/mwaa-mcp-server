@@ -368,6 +368,73 @@ class MWAATools:
         )
         return self._invoke_airflow_api(environment_name, "GET", endpoint)
 
+    async def list_task_instances(
+        self,
+        environment_name: str,
+        dag_id: Optional[str] = None,
+        dag_run_id: Optional[str] = None,
+        start_date_gte: Optional[str] = None,
+        start_date_lte: Optional[str] = None,
+        end_date_gte: Optional[str] = None,
+        end_date_lte: Optional[str] = None,
+        execution_date_gte: Optional[str] = None,
+        execution_date_lte: Optional[str] = None,
+        state: Optional[List[str]] = None,
+        pool: Optional[str] = None,
+        queue: Optional[str] = None,
+        duration_gte: Optional[float] = None,
+        duration_lte: Optional[float] = None,
+        limit: Optional[int] = 100,
+        offset: Optional[int] = 0,
+    ) -> Dict[str, Any]:
+        """List task instances across DAGs with flexible filtering via Airflow API.
+        
+        Uses the batch task instances endpoint which supports wildcards:
+        - dag_id='~' means all DAGs
+        - dag_run_id='~' means all DAG runs
+        
+        This enables time-range queries to find all tasks running in a specific window.
+        """
+        # Use wildcards if not specified
+        dag_path = dag_id if dag_id else "~"
+        run_path = dag_run_id if dag_run_id else "~"
+        
+        params: Dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+        }
+        
+        # Time-based filters
+        if start_date_gte:
+            params["start_date_gte"] = start_date_gte
+        if start_date_lte:
+            params["start_date_lte"] = start_date_lte
+        if end_date_gte:
+            params["end_date_gte"] = end_date_gte
+        if end_date_lte:
+            params["end_date_lte"] = end_date_lte
+        if execution_date_gte:
+            params["execution_date_gte"] = execution_date_gte
+        if execution_date_lte:
+            params["execution_date_lte"] = execution_date_lte
+            
+        # State and resource filters
+        if state:
+            params["state"] = state
+        if pool:
+            params["pool"] = pool
+        if queue:
+            params["queue"] = queue
+            
+        # Duration filters
+        if duration_gte is not None:
+            params["duration_gte"] = duration_gte
+        if duration_lte is not None:
+            params["duration_lte"] = duration_lte
+        
+        endpoint = f"/dags/{dag_path}/dagRuns/{run_path}/taskInstances"
+        return self._invoke_airflow_api(environment_name, "GET", endpoint, params=params)
+
     async def list_connections(
         self,
         environment_name: str,
