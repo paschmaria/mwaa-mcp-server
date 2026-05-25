@@ -1,13 +1,29 @@
 """MWAA MCP Server - Model Context Protocol server for Amazon Managed Workflows for Apache Airflow."""
 
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
+from fastmcp.server.apps import AppConfig, ResourceCSP
 
+from .pagination import DEFAULT_PAGE_SIZE
 from .tools import MWAATools
 from .prompts import AIRFLOW_BEST_PRACTICES, DAG_DESIGN_GUIDANCE
+from .ui_templates import (
+    DAG_GRAPH_HTML,
+    DAG_GRAPH_URI,
+    RUN_HEATMAP_HTML,
+    RUN_HEATMAP_URI,
+)
+
+# CSP shared by all MCP App resources — allow scripts/styles from unpkg
+# (Mermaid + the MCP Apps SDK), nothing else.
+_UI_CSP = ResourceCSP(
+    connect_domains=["https://unpkg.com"],
+    resource_domains=["https://unpkg.com"],
+)
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -359,29 +375,43 @@ async def list_dag_runs(
     state: Optional[List[str]] = None,
     execution_date_gte: Optional[str] = None,
     execution_date_lte: Optional[str] = None,
+    order_by: Optional[str] = "-start_date",
+    page: Optional[int] = 1,
+    page_size: Optional[int] = DEFAULT_PAGE_SIZE,
 ) -> Dict[str, Any]:
-    """List DAG runs for a specific DAG.
+    """List DAG runs for a specific DAG, newest-first by default.
+
+    Returns a paginated envelope (``summary``, ``dag_runs``, ``pagination``)
+    rather than a raw blob. The ``pagination.next_resource_uri`` points at a
+    follow-up slice — either read it as an MCP resource or re-call this tool
+    with ``page=2``.
 
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID
-        limit: Number of items to return
+        limit: Per-API-call limit Airflow uses to populate the source list
         state: Filter by state (queued, running, success, failed)
         execution_date_gte: Filter by execution date >= (ISO format)
         execution_date_lte: Filter by execution date <= (ISO format)
+        order_by: Airflow sort key. Default ``-start_date`` (newest first).
+            Use ``start_date`` for oldest-first; other valid keys include
+            ``execution_date``, ``end_date``, ``id``.
+        page: 1-based page index into the result list
+        page_size: Items returned per page in the envelope
 
     Returns:
-        Dictionary containing list of DAG runs
+        Envelope: {summary, dag_runs, pagination}
     """
-    limit_int = int(limit) if limit is not None else 100
-
     return await tools.list_dag_runs(
         environment_name,
         dag_id,
-        limit_int,
+        int(limit) if limit is not None else 100,
         state,
         execution_date_gte,
         execution_date_lte,
+        order_by=order_by,
+        page=int(page) if page else 1,
+        page_size=int(page_size) if page_size else DEFAULT_PAGE_SIZE,
     )
 
 
@@ -416,6 +446,14 @@ async def get_task_logs(
 ) -> Dict[str, Any]:
     """Get logs for a specific task instance.
 
+    Returns the head and tail of the log inline (enough to spot a failure
+    line) plus a ``resource_uri`` for the full body. Read that resource only
+    if the inlined excerpt isn't sufficient — it pulls the raw text into the
+    host's resource view rather than the conversation.
+
+    For triage, prefer ``summarize_task_failure`` which extracts just the
+    relevant error lines.
+
     Args:
         environment_name: Name of the MWAA environment
         dag_id: The DAG ID
@@ -424,12 +462,163 @@ async def get_task_logs(
         task_try_number: Specific try number (optional)
 
     Returns:
-        Dictionary containing task logs
+        {summary, log_text (head+tail), resource_uri}
     """
     task_try_number_int = int(task_try_number) if task_try_number is not None else None
 
     return await tools.get_task_logs(
         environment_name, dag_id, dag_run_id, task_id, task_try_number_int
+    )
+
+
+@mcp.tool(
+    name="get_dag_graph",
+    app=AppConfig(resource_uri=DAG_GRAPH_URI),
+)
+async def get_dag_graph(
+    environment_name: str,
+    dag_id: str,
+) -> Dict[str, Any]:
+    """Return the task dependency graph of a DAG.
+
+    Pulls Airflow's ``/dags/{dag_id}/tasks`` endpoint and constructs:
+    - nodes: one per task, with operator/trigger_rule/pool/retries
+    - edges: from each task to each of its downstream tasks
+    - mermaid: a ready-to-render ``flowchart LR`` string
+
+    Hosts that support MCP Apps render an interactive Mermaid graph;
+    text-only hosts can read the ``mermaid`` field directly.
+
+    Args:
+        environment_name: Name of the MWAA environment
+        dag_id: The DAG ID
+
+    Returns:
+        {summary, nodes, edges, mermaid}
+    """
+    return await tools.get_dag_graph(environment_name, dag_id)
+
+
+@mcp.resource(
+    DAG_GRAPH_URI,
+    name="dag_graph_ui",
+    app=AppConfig(csp=_UI_CSP),
+)
+async def dag_graph_ui() -> str:
+    """HTML viewer for DAG dependency graphs (rendered by get_dag_graph)."""
+    return DAG_GRAPH_HTML
+
+
+@mcp.tool(
+    name="get_dag_run_heatmap",
+    app=AppConfig(resource_uri=RUN_HEATMAP_URI),
+)
+async def get_dag_run_heatmap(
+    environment_name: str,
+    dag_id: str,
+    days: Optional[int] = 14,
+) -> Dict[str, Any]:
+    """Build a task × execution_date heatmap of run states for one DAG.
+
+    Pulls the last ``days`` of task instances and groups by
+    ``(task_id, execution_date)``, keeping the most recent try per cell.
+    Hosts that support MCP Apps render this as a clickable grid (clicking a
+    cell can be wired to follow-up tool calls like ``summarize_task_failure``).
+
+    Args:
+        environment_name: Name of the MWAA environment
+        dag_id: The DAG ID
+        days: Lookback in days (default 14)
+
+    Returns:
+        {summary, task_ids, execution_dates, cells}
+    """
+    return await tools.get_dag_run_heatmap(
+        environment_name, dag_id, int(days) if days is not None else 14
+    )
+
+
+@mcp.resource(
+    RUN_HEATMAP_URI,
+    name="run_heatmap_ui",
+    app=AppConfig(csp=_UI_CSP),
+)
+async def run_heatmap_ui() -> str:
+    """HTML viewer for run-history heatmaps (rendered by get_dag_run_heatmap)."""
+    return RUN_HEATMAP_HTML
+
+
+@mcp.tool(name="list_recent_failures")
+async def list_recent_failures(
+    environment_name: str,
+    dag_id: Optional[str] = None,
+    days: Optional[int] = 7,
+    limit: Optional[int] = 50,
+    include_upstream_failed: Optional[bool] = True,
+) -> Dict[str, Any]:
+    """List the most recent failures, newest-first.
+
+    Two modes:
+    - With ``dag_id``: failed DAG runs of that DAG, in the last N days.
+    - Without ``dag_id``: failed task instances across all DAGs in the
+      environment, in the last N days. Useful for "what broke overnight?"
+
+    Args:
+        environment_name: Name of the MWAA environment
+        dag_id: Optional. If set, restrict to runs of this DAG.
+        days: Lookback window in days (default 7)
+        limit: Max items pulled from Airflow before paginating (default 50)
+        include_upstream_failed: Include ``upstream_failed`` state, not just
+            ``failed`` (default True)
+
+    Returns:
+        Same envelope as list_dag_runs / list_task_instances.
+    """
+    return await tools.list_recent_failures(
+        environment_name=environment_name,
+        dag_id=dag_id,
+        days=int(days) if days is not None else 7,
+        limit=int(limit) if limit is not None else 50,
+        include_upstream_failed=bool(include_upstream_failed) if include_upstream_failed is not None else True,
+    )
+
+
+@mcp.tool(name="summarize_task_failure")
+async def summarize_task_failure(
+    environment_name: str,
+    dag_id: str,
+    dag_run_id: str,
+    task_id: str,
+    task_try_number: Optional[int] = None,
+    context_lines: Optional[int] = 4,
+) -> Dict[str, Any]:
+    """Extract just the failure-relevant lines from a task instance's log.
+
+    Replaces the "get_task_logs → grep for FAIL/Exception" pattern. Pulls the
+    full log, runs heuristics for dbt FAIL/ERROR, Python tracebacks/exceptions,
+    Airflow task-failed markers, and non-zero exit codes, and returns matched
+    lines with surrounding context plus a headline synopsis.
+
+    Use this for triage. Use ``get_task_logs`` only if you need the raw text.
+
+    Args:
+        environment_name: Name of the MWAA environment
+        dag_id: The DAG ID
+        dag_run_id: The DAG run ID
+        task_id: The task ID
+        task_try_number: Specific try number (default 1)
+        context_lines: Lines of context before/after each match (default 4)
+
+    Returns:
+        {summary, headline, dbt_test_failures, python_exceptions, ..., resource_uri}
+    """
+    return await tools.summarize_task_failure(
+        environment_name,
+        dag_id,
+        dag_run_id,
+        task_id,
+        int(task_try_number) if task_try_number is not None else None,
+        int(context_lines) if context_lines is not None else 4,
     )
 
 
@@ -451,11 +640,16 @@ async def list_task_instances(
     duration_lte: Optional[float] = None,
     limit: Optional[int] = 100,
     offset: Optional[int] = 0,
+    page: Optional[int] = 1,
+    page_size: Optional[int] = DEFAULT_PAGE_SIZE,
 ) -> Dict[str, Any]:
     """List task instances across DAGs with flexible time-based filtering.
 
     This is the key tool for finding what tasks were running during a specific time window.
     Supports wildcards: omit dag_id or dag_run_id to query across all DAGs/runs.
+
+    Returns a paginated envelope (``summary``, ``task_instances``,
+    ``pagination``) with ``pagination.next_resource_uri`` for the next slice.
 
     Args:
         environment_name: Name of the MWAA environment
@@ -507,6 +701,8 @@ async def list_task_instances(
         duration_lte=duration_lte_float,
         limit=limit_int,
         offset=offset_int,
+        page=int(page) if page else 1,
+        page_size=int(page_size) if page_size else DEFAULT_PAGE_SIZE,
     )
 
 
@@ -574,6 +770,121 @@ async def get_import_errors(
     offset_int = int(offset) if offset is not None else 0
 
     return await tools.get_import_errors(environment_name, limit_int, offset_int)
+
+
+# Resource handlers — follow-up URIs returned by list_* and get_task_logs.
+# These are stateless: every parameter needed to re-fetch the slice is
+# encoded in the URI itself.
+
+@mcp.resource(
+    "mwaa://logs/{environment_name}/{dag_id}/{dag_run_id}/{task_id}{?try_number}",
+    name="task_log_full",
+    mime_type="text/plain",
+)
+async def task_log_full(
+    environment_name: str,
+    dag_id: str,
+    dag_run_id: str,
+    task_id: str,
+    try_number: Optional[str] = None,
+) -> str:
+    """Full task log body. Returned by get_task_logs as resource_uri."""
+    try_num = int(try_number) if try_number else None
+    result = await tools.get_task_logs(
+        environment_name, dag_id, dag_run_id, task_id, try_num, full=True
+    )
+    if "error" in result:
+        return f"Error fetching log: {result['error']}"
+    return str(result.get("log_text", ""))
+
+
+@mcp.resource(
+    "mwaa://dag_runs/{environment_name}/{dag_id}"
+    "{?page,page_size,limit,order_by,state,execution_date_gte,execution_date_lte}",
+    name="dag_runs_page",
+    mime_type="application/json",
+)
+async def dag_runs_page(
+    environment_name: str,
+    dag_id: str,
+    page: Optional[str] = "1",
+    page_size: Optional[str] = str(DEFAULT_PAGE_SIZE),
+    limit: Optional[str] = "100",
+    order_by: Optional[str] = "-start_date",
+    state: Optional[str] = None,
+    execution_date_gte: Optional[str] = None,
+    execution_date_lte: Optional[str] = None,
+) -> str:
+    """Follow-up slice of list_dag_runs. Same envelope as the tool."""
+    result = await tools.list_dag_runs(
+        environment_name=environment_name,
+        dag_id=dag_id,
+        limit=int(limit) if limit else 100,
+        state=[state] if state else None,
+        execution_date_gte=execution_date_gte,
+        execution_date_lte=execution_date_lte,
+        order_by=order_by,
+        page=int(page) if page else 1,
+        page_size=int(page_size) if page_size else DEFAULT_PAGE_SIZE,
+    )
+    return json.dumps(result, default=str)
+
+
+@mcp.resource(
+    "mwaa://task_instances/{environment_name}/{dag_id}/{dag_run_id}"
+    "{?page,page_size,limit,offset,state,start_date_gte,start_date_lte,"
+    "end_date_gte,end_date_lte,execution_date_gte,execution_date_lte,"
+    "pool,queue,duration_gte,duration_lte}",
+    name="task_instances_page",
+    mime_type="application/json",
+)
+async def task_instances_page(
+    environment_name: str,
+    dag_id: str,
+    dag_run_id: str,
+    page: Optional[str] = "1",
+    page_size: Optional[str] = str(DEFAULT_PAGE_SIZE),
+    limit: Optional[str] = "100",
+    offset: Optional[str] = "0",
+    state: Optional[str] = None,
+    start_date_gte: Optional[str] = None,
+    start_date_lte: Optional[str] = None,
+    end_date_gte: Optional[str] = None,
+    end_date_lte: Optional[str] = None,
+    execution_date_gte: Optional[str] = None,
+    execution_date_lte: Optional[str] = None,
+    pool: Optional[str] = None,
+    queue: Optional[str] = None,
+    duration_gte: Optional[str] = None,
+    duration_lte: Optional[str] = None,
+) -> str:
+    """Follow-up slice of list_task_instances. Same envelope as the tool."""
+    # The wildcards ('~') don't survive URL path matching cleanly; treat them
+    # as None to fall back to the wildcard behavior on the tool side.
+    dag_id_arg = None if dag_id == "~" else dag_id
+    dag_run_arg = None if dag_run_id == "~" else dag_run_id
+
+    result = await tools.list_task_instances(
+        environment_name=environment_name,
+        dag_id=dag_id_arg,
+        dag_run_id=dag_run_arg,
+        start_date_gte=start_date_gte,
+        start_date_lte=start_date_lte,
+        end_date_gte=end_date_gte,
+        end_date_lte=end_date_lte,
+        execution_date_gte=execution_date_gte,
+        execution_date_lte=execution_date_lte,
+        state=[state] if state else None,
+        pool=pool,
+        queue=queue,
+        duration_gte=float(duration_gte) if duration_gte else None,
+        duration_lte=float(duration_lte) if duration_lte else None,
+        limit=int(limit) if limit else 100,
+        offset=int(offset) if offset else 0,
+        page=int(page) if page else 1,
+        page_size=int(page_size) if page_size else DEFAULT_PAGE_SIZE,
+    )
+    return json.dumps(result, default=str)
 
 
 # Expert Guidance Tools
