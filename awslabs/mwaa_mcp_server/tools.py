@@ -3,13 +3,68 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from .log_summary import summarize_log
+from .pagination import (
+    DEFAULT_PAGE_SIZE,
+    encode_log_resource_uri,
+    extract_log_text,
+    truncate_log_text,
+    with_resource_link,
+)
+
 logger = logging.getLogger(__name__)
+
+# Terminal task/run states considered "done failing" for diagnostic tools.
+FAILURE_STATES = {"failed", "upstream_failed"}
+
+
+def _derive_execution_date(ti: Dict[str, Any]) -> str:
+    """Return a YYYY-MM-DD string for the run this task instance belongs to.
+
+    Airflow 3.x removed ``execution_date``/``logical_date`` from the task
+    instance payload. Fall back to ``start_date`` and finally to parsing the
+    timestamp out of the ``dag_run_id`` (e.g. ``scheduled__2026-05-22T...``
+    or ``asset_triggered__2026-05-23T...``).
+    """
+    for key in ("logical_date", "execution_date", "start_date", "run_after"):
+        v = ti.get(key)
+        if isinstance(v, str) and len(v) >= 10:
+            return v[:10]
+    run_id = ti.get("dag_run_id") or ""
+    if "__" in run_id:
+        suffix = run_id.split("__", 1)[1]
+        if len(suffix) >= 10 and suffix[4] == "-" and suffix[7] == "-":
+            return suffix[:10]
+    return ""
+
+
+def _sanitize_mermaid_id(node_id: str) -> str:
+    """Mermaid node IDs can't contain `.`, `-`, or spaces — replace with `_`."""
+    return "".join(c if c.isalnum() else "_" for c in node_id)
+
+
+def _build_mermaid(
+    dag_id: str, nodes: List[Dict[str, Any]], edges: List[Dict[str, str]]
+) -> str:
+    """Build a Mermaid `flowchart LR` string for a DAG's task graph."""
+    lines = [f"flowchart LR", f"  %% DAG: {dag_id}"]
+    for n in nodes:
+        nid = _sanitize_mermaid_id(n["id"])
+        label = n["id"].replace('"', "'")
+        op = n.get("operator") or ""
+        suffix = f"\\n[{op}]" if op else ""
+        lines.append(f'  {nid}["{label}{suffix}"]')
+    for e in edges:
+        a = _sanitize_mermaid_id(e["from"])
+        b = _sanitize_mermaid_id(e["to"])
+        lines.append(f"  {a} --> {b}")
+    return "\n".join(lines)
 
 
 class MWAATools:
@@ -43,24 +98,39 @@ class MWAATools:
             }
 
             if "params" in kwargs:
-                processed_params: Dict[str, Any] = {}
-                for k, v in kwargs["params"].items():
-                    if v is not None:
-                        if isinstance(v, str) and v.isdigit():
-                            processed_params[k] = int(v)
-                        elif isinstance(v, str) and v.lower() in ["true", "false"]:
-                            processed_params[k] = v.lower() == "true"
-                        elif isinstance(v, str) and v.startswith("[") and v.endswith("]"):
-                            try:
-                                processed_params[k] = json.loads(v)
-                            except json.JSONDecodeError:
-                                processed_params[k] = v
-                        else:
-                            processed_params[k] = v
+                from urllib.parse import quote as _q
 
-                query_string = "&".join([f"{k}={v}" for k, v in processed_params.items()])
-                if query_string:
-                    params["Path"] = f"{path}?{query_string}"
+                pairs: List[str] = []
+                for k, v in kwargs["params"].items():
+                    if v is None:
+                        continue
+                    # Coerce simple string -> typed value so Airflow's strict
+                    # validators (especially Airflow 3) accept it.
+                    if isinstance(v, str) and v.isdigit():
+                        v = int(v)
+                    elif isinstance(v, str) and v.lower() in ("true", "false"):
+                        v = v.lower() == "true"
+                    elif (
+                        isinstance(v, str)
+                        and v.startswith("[")
+                        and v.endswith("]")
+                    ):
+                        try:
+                            v = json.loads(v)
+                        except json.JSONDecodeError:
+                            pass
+                    # Lists must be emitted as repeated params (`state=a&state=b`),
+                    # not as the str() of a Python list.
+                    if isinstance(v, (list, tuple)):
+                        for item in v:
+                            pairs.append(f"{_q(str(k))}={_q(str(item))}")
+                    elif isinstance(v, bool):
+                        pairs.append(f"{_q(str(k))}={'true' if v else 'false'}")
+                    else:
+                        pairs.append(f"{_q(str(k))}={_q(str(v))}")
+
+                if pairs:
+                    params["Path"] = f"{path}?{'&'.join(pairs)}"
 
             if "json_data" in kwargs:
                 params["Body"] = json.dumps(kwargs["json_data"])
@@ -325,19 +395,59 @@ class MWAATools:
         state: Optional[List[str]] = None,
         execution_date_gte: Optional[str] = None,
         execution_date_lte: Optional[str] = None,
+        order_by: Optional[str] = "-start_date",
+        page: int = 1,
+        page_size: int = DEFAULT_PAGE_SIZE,
     ) -> Dict[str, Any]:
-        """List DAG runs via Airflow API."""
-        params: Dict[str, Any] = {"limit": limit}
+        """List DAG runs via Airflow API.
 
+        Defaults to newest-first via ``order_by="-start_date"`` and returns a
+        paginated envelope with a follow-up ``next_resource_uri`` instead of
+        dumping every run.
+        """
+        params: Dict[str, Any] = {"limit": limit}
         if state:
             params["state"] = state
         if execution_date_gte:
             params["execution_date_gte"] = execution_date_gte
         if execution_date_lte:
             params["execution_date_lte"] = execution_date_lte
+        if order_by:
+            params["order_by"] = order_by
 
-        return self._invoke_airflow_api(
+        raw = self._invoke_airflow_api(
             environment_name, "GET", f"/dags/{dag_id}/dagRuns", params=params
+        )
+        if "error" in raw:
+            return raw
+
+        runs = (raw.get("RestApiResponse") or {}).get("dag_runs", []) or []
+        total = (raw.get("RestApiResponse") or {}).get("total_entries", len(runs))
+
+        return with_resource_link(
+            summary={
+                "dag_id": dag_id,
+                "environment_name": environment_name,
+                "total_entries_reported_by_airflow": total,
+                "order_by": order_by,
+                "filters": {
+                    "state": state,
+                    "execution_date_gte": execution_date_gte,
+                    "execution_date_lte": execution_date_lte,
+                },
+            },
+            items=runs,
+            page=page,
+            page_size=page_size,
+            resource_path=f"dag_runs/{environment_name}/{dag_id}",
+            resource_params={
+                "limit": limit,
+                "order_by": order_by,
+                "state": state,
+                "execution_date_gte": execution_date_gte,
+                "execution_date_lte": execution_date_lte,
+            },
+            item_key="dag_runs",
         )
 
     async def get_task_instance(
@@ -357,8 +467,14 @@ class MWAATools:
         dag_run_id: str,
         task_id: str,
         task_try_number: Optional[int] = None,
+        full: bool = False,
     ) -> Dict[str, Any]:
-        """Get task logs via Airflow API."""
+        """Get task logs via Airflow API.
+
+        Returns head+tail of the log inline by default plus a ``resource_uri``
+        pointing at the full body. Pass ``full=True`` to bypass truncation —
+        the resource handler uses this path.
+        """
         if task_try_number is None:
             task_try_number = 1
 
@@ -366,7 +482,288 @@ class MWAATools:
             f"/dags/{dag_id}/dagRuns/{dag_run_id}"
             f"/taskInstances/{task_id}/logs/{task_try_number}"
         )
-        return self._invoke_airflow_api(environment_name, "GET", endpoint)
+        raw = self._invoke_airflow_api(environment_name, "GET", endpoint)
+        if "error" in raw:
+            return raw
+
+        log_text = extract_log_text(raw)
+        if full:
+            return {"log_text": log_text, "total_lines": len(log_text.splitlines())}
+
+        body, meta = truncate_log_text(log_text)
+        return {
+            "summary": {
+                "dag_id": dag_id,
+                "dag_run_id": dag_run_id,
+                "task_id": task_id,
+                "task_try_number": task_try_number,
+                **meta,
+            },
+            "log_text": body,
+            "resource_uri": encode_log_resource_uri(
+                environment_name, dag_id, dag_run_id, task_id, task_try_number
+            ),
+        }
+
+    async def get_dag_run_heatmap(
+        self,
+        environment_name: str,
+        dag_id: str,
+        days: int = 14,
+    ) -> Dict[str, Any]:
+        """Build a (task_id × execution_date) heatmap of run states.
+
+        Pulls task instances for the DAG over the last ``days`` window via
+        the batch endpoint, collapses to one cell per
+        ``(task_id, execution_date)`` (taking the most recent try), and
+        returns:
+
+        - ``task_ids``: deduped, alphabetically ordered
+        - ``execution_dates``: deduped, ascending ISO dates
+        - ``cells``: [{task_id, execution_date, state, dag_run_id, ...}]
+
+        Hosts with MCP Apps support render this as a clickable grid; text
+        hosts can scan ``cells`` directly.
+        """
+        # Airflow's REST API wants ISO with 'Z' (not '+00:00') and without
+        # microseconds — match its examples.
+        cutoff = (
+            (datetime.now(timezone.utc) - timedelta(days=days))
+            .replace(microsecond=0)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+
+        # Fetch with a high limit; this endpoint returns up to 1000 per page.
+        # Airflow 3 removed execution_date/logical_date from task instances —
+        # use start_date_gte and derive the calendar date from start_date or
+        # the run id prefix.
+        params: Dict[str, Any] = {
+            "limit": 1000,
+            "start_date_gte": cutoff,
+        }
+        endpoint = f"/dags/{dag_id}/dagRuns/~/taskInstances"
+        raw = self._invoke_airflow_api(
+            environment_name, "GET", endpoint, params=params
+        )
+        if "error" in raw:
+            return raw
+
+        body = raw.get("RestApiResponse") or {}
+        instances = body.get("task_instances", []) or []
+
+        # Collapse to most-recent-try per (task_id, execution_date).
+        best: Dict[tuple, Dict[str, Any]] = {}
+        for ti in instances:
+            tid = ti.get("task_id")
+            if not tid:
+                continue
+            exec_date = _derive_execution_date(ti)
+            if not exec_date:
+                continue
+            key = (tid, exec_date)
+            try_no = ti.get("try_number") or 0
+            existing = best.get(key)
+            if existing is None or (existing.get("try_number") or 0) < try_no:
+                best[key] = ti
+
+        cells: List[Dict[str, Any]] = []
+        for (tid, exec_date), ti in best.items():
+            cells.append(
+                {
+                    "task_id": tid,
+                    "execution_date": exec_date,
+                    "state": ti.get("state"),
+                    "dag_run_id": ti.get("dag_run_id"),
+                    "try_number": ti.get("try_number"),
+                    "duration": ti.get("duration"),
+                }
+            )
+
+        task_ids = sorted({c["task_id"] for c in cells})
+        execution_dates = sorted({c["execution_date"] for c in cells})
+
+        return {
+            "summary": {
+                "environment_name": environment_name,
+                "dag_id": dag_id,
+                "days": days,
+                "task_count": len(task_ids),
+                "run_date_count": len(execution_dates),
+                "cell_count": len(cells),
+            },
+            "task_ids": task_ids,
+            "execution_dates": execution_dates,
+            "cells": cells,
+        }
+
+    async def get_dag_graph(
+        self,
+        environment_name: str,
+        dag_id: str,
+    ) -> Dict[str, Any]:
+        """Return the task dependency graph of a DAG.
+
+        Pulls Airflow's ``/dags/{dag_id}/tasks`` (each task carries
+        ``downstream_task_ids``), then builds:
+
+        - ``nodes``: [{id, operator, trigger_rule, retries, ...}]
+        - ``edges``: [{from, to}]
+        - ``mermaid``: a ``flowchart LR`` string for quick text rendering
+
+        The graph is also wrapped in ``meta.ui`` pointing at the
+        ``ui://mwaa/dag-graph`` MCP App, so hosts that support it render an
+        interactive view automatically.
+        """
+        raw = self._invoke_airflow_api(
+            environment_name, "GET", f"/dags/{dag_id}/tasks"
+        )
+        if "error" in raw:
+            return raw
+
+        body = raw.get("RestApiResponse") or {}
+        tasks = body.get("tasks", []) or []
+
+        nodes: List[Dict[str, Any]] = []
+        edges: List[Dict[str, str]] = []
+        for t in tasks:
+            tid = t.get("task_id")
+            if not tid:
+                continue
+            nodes.append(
+                {
+                    "id": tid,
+                    "operator": t.get("class_ref", {}).get("class_name")
+                    or t.get("operator_name"),
+                    "trigger_rule": t.get("trigger_rule"),
+                    "retries": t.get("retries"),
+                    "pool": t.get("pool"),
+                    "depends_on_past": t.get("depends_on_past"),
+                }
+            )
+            for ds in t.get("downstream_task_ids", []) or []:
+                edges.append({"from": tid, "to": ds})
+
+        mermaid = _build_mermaid(dag_id, nodes, edges)
+        return {
+            "summary": {
+                "environment_name": environment_name,
+                "dag_id": dag_id,
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+            },
+            "nodes": nodes,
+            "edges": edges,
+            "mermaid": mermaid,
+        }
+
+    async def list_recent_failures(
+        self,
+        environment_name: str,
+        dag_id: Optional[str] = None,
+        days: int = 7,
+        limit: int = 50,
+        include_upstream_failed: bool = True,
+    ) -> Dict[str, Any]:
+        """Newest-first list of failed DAG runs (and optionally task instances).
+
+        If ``dag_id`` is given, returns the most recent failed runs of that
+        DAG. If ``dag_id`` is omitted, returns the most recent failed task
+        instances across all DAGs in the environment — useful for "what
+        broke overnight?" type questions.
+
+        Both modes always sort newest-first.
+        """
+        cutoff = (
+            (datetime.now(timezone.utc) - timedelta(days=days))
+            .replace(microsecond=0)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+
+        if dag_id:
+            # DAG runs only have ``failed`` — ``upstream_failed`` is a task
+            # instance state and Airflow's validator rejects it here.
+            #
+            # Airflow's REST API silently ignores execution_date_gte on this
+            # endpoint, so we send it (in case behavior changes) AND apply a
+            # client-side filter on start_date below.
+            result = await self.list_dag_runs(
+                environment_name=environment_name,
+                dag_id=dag_id,
+                limit=limit,
+                state=["failed"],
+                execution_date_gte=cutoff,
+                order_by="-start_date",
+                page=1,
+                page_size=min(limit, DEFAULT_PAGE_SIZE),
+            )
+            if "error" in result:
+                return result
+            runs = result.get("dag_runs", []) or []
+            filtered = [r for r in runs if (r.get("start_date") or "") >= cutoff]
+            result["dag_runs"] = filtered
+            summary = result.get("summary") or {}
+            summary["client_filtered_cutoff"] = cutoff
+            summary["client_filtered_count"] = len(filtered)
+            result["summary"] = summary
+            return result
+
+        ti_states = ["failed"]
+        if include_upstream_failed:
+            ti_states.append("upstream_failed")
+        return await self.list_task_instances(
+            environment_name=environment_name,
+            start_date_gte=cutoff,
+            state=ti_states,
+            limit=limit,
+            page=1,
+            page_size=min(limit, DEFAULT_PAGE_SIZE),
+        )
+
+    async def summarize_task_failure(
+        self,
+        environment_name: str,
+        dag_id: str,
+        dag_run_id: str,
+        task_id: str,
+        task_try_number: Optional[int] = None,
+        context_lines: int = 4,
+    ) -> Dict[str, Any]:
+        """Fetch a task's log and return the lines that explain the failure.
+
+        Runs heuristic matchers for dbt FAIL/ERROR/Runtime Error, Python
+        tracebacks/exceptions, Airflow "Task failed" markers, and non-zero
+        exit codes. Returns:
+
+            {
+              "headline": "...",            # one-line synopsis
+              "dbt_done_stats": {...},      # if dbt ran a build
+              "dbt_test_failures": [...],   # each with line_no + context
+              "python_exceptions": [...],
+              ...
+              "resource_uri": "mwaa://logs/...",  # full log if needed
+            }
+        """
+        log_resp = await self.get_task_logs(
+            environment_name, dag_id, dag_run_id, task_id, task_try_number, full=True
+        )
+        if "error" in log_resp:
+            return log_resp
+
+        log_text = str(log_resp.get("log_text", ""))
+        summary = summarize_log(log_text, context_lines=context_lines)
+
+        return {
+            "summary": {
+                "dag_id": dag_id,
+                "dag_run_id": dag_run_id,
+                "task_id": task_id,
+                "task_try_number": task_try_number,
+            },
+            **summary.to_dict(),
+            "resource_uri": encode_log_resource_uri(
+                environment_name, dag_id, dag_run_id, task_id, task_try_number
+            ),
+        }
 
     async def list_task_instances(
         self,
@@ -386,6 +783,8 @@ class MWAATools:
         duration_lte: Optional[float] = None,
         limit: Optional[int] = 100,
         offset: Optional[int] = 0,
+        page: int = 1,
+        page_size: int = DEFAULT_PAGE_SIZE,
     ) -> Dict[str, Any]:
         """List task instances across DAGs with flexible filtering via Airflow API.
         
@@ -433,7 +832,55 @@ class MWAATools:
             params["duration_lte"] = duration_lte
         
         endpoint = f"/dags/{dag_path}/dagRuns/{run_path}/taskInstances"
-        return self._invoke_airflow_api(environment_name, "GET", endpoint, params=params)
+        raw = self._invoke_airflow_api(environment_name, "GET", endpoint, params=params)
+        if "error" in raw:
+            return raw
+
+        body = raw.get("RestApiResponse") or {}
+        instances = body.get("task_instances", []) or []
+        total = body.get("total_entries", len(instances))
+
+        return with_resource_link(
+            summary={
+                "environment_name": environment_name,
+                "dag_id": dag_id,
+                "dag_run_id": dag_run_id,
+                "total_entries_reported_by_airflow": total,
+                "filters": {
+                    "state": state,
+                    "start_date_gte": start_date_gte,
+                    "start_date_lte": start_date_lte,
+                    "end_date_gte": end_date_gte,
+                    "end_date_lte": end_date_lte,
+                    "execution_date_gte": execution_date_gte,
+                    "execution_date_lte": execution_date_lte,
+                    "pool": pool,
+                    "queue": queue,
+                    "duration_gte": duration_gte,
+                    "duration_lte": duration_lte,
+                },
+            },
+            items=instances,
+            page=page,
+            page_size=page_size,
+            resource_path=f"task_instances/{environment_name}/{dag_path}/{run_path}",
+            resource_params={
+                "limit": limit,
+                "offset": offset,
+                "state": state,
+                "start_date_gte": start_date_gte,
+                "start_date_lte": start_date_lte,
+                "end_date_gte": end_date_gte,
+                "end_date_lte": end_date_lte,
+                "execution_date_gte": execution_date_gte,
+                "execution_date_lte": execution_date_lte,
+                "pool": pool,
+                "queue": queue,
+                "duration_gte": duration_gte,
+                "duration_lte": duration_lte,
+            },
+            item_key="task_instances",
+        )
 
     async def list_connections(
         self,
