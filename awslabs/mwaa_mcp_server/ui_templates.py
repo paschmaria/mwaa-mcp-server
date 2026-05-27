@@ -51,7 +51,9 @@ DAG_GRAPH_HTML = """<!DOCTYPE html>
   </div>
 
   <script type="module">
-    import { App } from "https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with-deps";
+    // esm.sh resolves the package main and bundles transitive deps —
+    // the legacy ``/app-with-deps`` subpath on unpkg was removed in 1.x.
+    import { App } from "https://esm.sh/@modelcontextprotocol/ext-apps@1.7.1";
     import mermaid from "https://unpkg.com/mermaid@10/dist/mermaid.esm.min.mjs";
 
     mermaid.initialize({ startOnLoad: false, theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' });
@@ -181,7 +183,9 @@ RUN_HEATMAP_HTML = """<!DOCTYPE html>
   <div class="legend" id="legend"></div>
 
   <script type="module">
-    import { App } from "https://unpkg.com/@modelcontextprotocol/ext-apps@0.4.0/app-with-deps";
+    // esm.sh resolves the package main and bundles transitive deps —
+    // the legacy ``/app-with-deps`` subpath on unpkg was removed in 1.x.
+    import { App } from "https://esm.sh/@modelcontextprotocol/ext-apps@1.7.1";
 
     const titleEl = document.getElementById('title');
     const metaEl = document.getElementById('meta');
