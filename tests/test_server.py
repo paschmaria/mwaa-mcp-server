@@ -457,3 +457,104 @@ class TestListRecentFailures:
         ids = [r["dag_run_id"] for r in runs]
         assert "scheduled__2026-02-22T00:35:00+00:00" not in ids
         assert "scheduled__2026-05-26T00:00:00+00:00" in ids
+
+
+class TestGetDagRunHeatmap:
+    """The heatmap tool must filter cells client-side because Airflow's
+    batch task-instances endpoint silently ignores ``start_date_gte``.
+
+    Same bug class as list_recent_failures task-instance mode — the
+    regression these tests guard against is returning months-old cells when
+    the caller asked for the last N days.
+    """
+
+    @pytest.mark.asyncio
+    async def test_filters_task_instances_outside_window(
+        self, mwaa_tools, mock_boto_client
+    ):
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {
+                "task_instances": [
+                    # Way outside the 3-day window.
+                    {
+                        "task_id": "t1",
+                        "dag_run_id": "scheduled__2026-02-22T00:00:00+00:00",
+                        "logical_date": "2026-02-22T00:00:00Z",
+                        "start_date": "2026-02-22T01:00:00Z",
+                        "state": "failed",
+                        "try_number": 1,
+                    },
+                    # Inside the window.
+                    {
+                        "task_id": "t1",
+                        "dag_run_id": "scheduled__2026-05-26T00:00:00+00:00",
+                        "logical_date": "2026-05-26T00:00:00Z",
+                        "start_date": "2026-05-26T01:00:00Z",
+                        "state": "success",
+                        "try_number": 1,
+                    },
+                ]
+            },
+            "RestApiStatusCode": 200,
+        }
+
+        import datetime as _dt
+
+        class _FixedDT(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return _dt.datetime(2026, 5, 27, 12, 0, 0, tzinfo=tz)
+
+        with patch("awslabs.mwaa_mcp_server.tools.datetime", _FixedDT):
+            result = await mwaa_tools.get_dag_run_heatmap(
+                "test-env", "my_dag", days=3
+            )
+
+        dates = result["execution_dates"]
+        # Out-of-window date must not appear; in-window date must.
+        assert "2026-02-22" not in dates
+        assert "2026-05-26" in dates
+        # And the summary should expose the cutoff so callers can see what
+        # window the data covers.
+        assert result["summary"]["client_filtered_cutoff_date"] == "2026-05-24"
+
+    @pytest.mark.asyncio
+    async def test_includes_failed_before_start_via_derived_date(
+        self, mwaa_tools, mock_boto_client
+    ):
+        # Failed task instances that never started (queued -> failed) have
+        # null start_date. _derive_execution_date falls back to logical_date
+        # / run_after / dag_run_id prefix, so they still get included if
+        # their derived date is in the window.
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {
+                "task_instances": [
+                    {
+                        "task_id": "queued_then_failed",
+                        "dag_run_id": "scheduled__2026-05-26T00:00:00+00:00",
+                        "logical_date": "2026-05-26T00:00:00Z",
+                        "start_date": None,
+                        "state": "failed",
+                        "try_number": 1,
+                    },
+                ]
+            },
+            "RestApiStatusCode": 200,
+        }
+
+        import datetime as _dt
+
+        class _FixedDT(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return _dt.datetime(2026, 5, 27, 12, 0, 0, tzinfo=tz)
+
+        with patch("awslabs.mwaa_mcp_server.tools.datetime", _FixedDT):
+            result = await mwaa_tools.get_dag_run_heatmap(
+                "test-env", "my_dag", days=3
+            )
+
+        # The null-start_date failure should still be present because its
+        # logical_date is inside the window.
+        assert "2026-05-26" in result["execution_dates"]
+        assert "queued_then_failed" in result["task_ids"]

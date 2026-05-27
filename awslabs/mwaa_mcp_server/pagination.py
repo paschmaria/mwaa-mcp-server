@@ -14,6 +14,18 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 # Strips ANSI color/style escapes that dbt and other CLIs emit (`\x1b[31m` etc.).
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# CloudWatch task handler echoes wrapper lines even when the underlying
+# log stream returns no events. These aren't log content — Airflow's
+# CloudWatchRemoteLogIO describes what it tried to fetch. Strip them so
+# a missing/rotated log surfaces as empty rather than as
+# "Reading remote log from Cloudwatch ...\n'nextForwardToken'".
+_CW_ENVELOPE_RE = re.compile(
+    r"^(?:Reading remote log from Cloudwatch[^\n]*"
+    r"|'nextForwardToken'\s*"
+    r"|\*\*\* Falling back to local log[^\n]*)$",
+    re.MULTILINE,
+)
+
 # Default page size — small enough to avoid hitting host token limits, large
 # enough that one page is usually sufficient for "what failed recently?" type
 # questions.
@@ -156,6 +168,13 @@ def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
 
 
+def _strip_cw_envelope(s: str) -> str:
+    """Drop CloudWatch task handler wrapper lines from a log body."""
+    cleaned = _CW_ENVELOPE_RE.sub("", s)
+    # Collapse the blank lines we just punched out.
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip("\n")
+
+
 def _event_to_line(entry: Any) -> str:
     """Render one structured log entry from Airflow into a single readable line.
 
@@ -201,15 +220,17 @@ def extract_log_text(raw_response: Dict[str, Any]) -> str:
     """
     body = raw_response.get("RestApiResponse", raw_response)
     if isinstance(body, str):
-        return _strip_ansi(body)
+        return _strip_cw_envelope(_strip_ansi(body))
     if not isinstance(body, dict):
-        return _strip_ansi(str(body))
+        return _strip_cw_envelope(_strip_ansi(str(body)))
 
     content = body.get("content")
     if isinstance(content, list):
-        return "\n".join(_event_to_line(c) for c in content)
+        return _strip_cw_envelope(
+            "\n".join(_event_to_line(c) for c in content)
+        )
     if isinstance(content, str):
-        return _strip_ansi(content)
+        return _strip_cw_envelope(_strip_ansi(content))
     # Unknown shape — return a best-effort string so the caller still sees
     # something rather than nothing.
-    return _strip_ansi(str(body))
+    return _strip_cw_envelope(_strip_ansi(str(body)))
