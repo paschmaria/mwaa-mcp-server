@@ -1,6 +1,7 @@
 """Tests for MWAA MCP Server."""
 
 import pytest
+from botocore.exceptions import ClientError
 from unittest.mock import Mock, patch
 
 from awslabs.mwaa_mcp_server.tools import MWAATools
@@ -284,3 +285,175 @@ class TestAirflowApiTools:
 
         call_args = mock_boto_client.invoke_rest_api.call_args
         assert "/dags/importErrors" in call_args.kwargs["Path"]
+
+
+class TestAirflowApiErrorSurfacing:
+    """When the underlying Airflow REST call fails, callers should see what
+    really happened — status code and response body — not an opaque empty
+    ``RestApiClientException``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_client_error_surfaces_status_and_body(
+        self, mwaa_tools, mock_boto_client
+    ):
+        # Simulate MWAA raising RestApiClientException with the Airflow body
+        # tucked into the response payload. boto exposes it via e.response.
+        airflow_body = {"detail": "DAG with dag_id: foo was not found"}
+        err = ClientError(
+            error_response={
+                "Error": {
+                    "Code": "RestApiClientException",
+                    "Message": "",
+                },
+                "RestApiStatusCode": 404,
+                "RestApiResponse": airflow_body,
+            },
+            operation_name="InvokeRestApi",
+        )
+        mock_boto_client.invoke_rest_api.side_effect = err
+
+        result = await mwaa_tools.get_dag("test-env", "missing-dag")
+
+        # Previously this returned only {"error": "<empty boto wrapper text>"}
+        # which was useless for diagnosis. Now the real Airflow status code
+        # and body should be reachable.
+        assert result.get("error_code") == "RestApiClientException"
+        assert result.get("rest_api_status_code") == 404
+        assert result.get("rest_api_response") == airflow_body
+
+    @pytest.mark.asyncio
+    async def test_client_error_with_empty_message_still_has_status(
+        self, mwaa_tools, mock_boto_client
+    ):
+        # The original opaque-error case: empty Message, no body. The status
+        # code is still informative, so callers can at least tell 4xx vs 5xx.
+        err = ClientError(
+            error_response={
+                "Error": {"Code": "RestApiClientException", "Message": ""},
+                "RestApiStatusCode": 422,
+            },
+            operation_name="InvokeRestApi",
+        )
+        mock_boto_client.invoke_rest_api.side_effect = err
+
+        result = await mwaa_tools.get_dag_source("test-env", "some-dag")
+        assert result.get("rest_api_status_code") == 422
+        assert result.get("error_code") == "RestApiClientException"
+
+
+class TestListRecentFailures:
+    """list_recent_failures must actually return *recent* failures.
+
+    Airflow's batch task-instances endpoint silently ignores ``start_date_gte``
+    and orders oldest-first, so we have to filter and sort client-side. The
+    regression these tests guard against: returning months-old failures when
+    the caller asked for the last 3 days.
+    """
+
+    @pytest.mark.asyncio
+    async def test_task_instance_mode_filters_old_failures(
+        self, mwaa_tools, mock_boto_client
+    ):
+        # Mix of old (Feb) and recent (within lookback) task instances.
+        # The Feb ones should be filtered out; the recent ones should be
+        # ordered newest-first.
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {
+                "task_instances": [
+                    {
+                        "task_id": "ancient_task",
+                        "dag_id": "old_dag",
+                        "dag_run_id": "scheduled__2026-02-22T00:35:00+00:00",
+                        "start_date": "2026-02-22T00:55:31Z",
+                        "state": "failed",
+                    },
+                    {
+                        "task_id": "recent_task_old",
+                        "dag_id": "x",
+                        "dag_run_id": "scheduled__2026-05-25T00:00:00+00:00",
+                        "start_date": "2026-05-25T01:00:00Z",
+                        "state": "failed",
+                    },
+                    {
+                        "task_id": "recent_task_new",
+                        "dag_id": "x",
+                        "dag_run_id": "scheduled__2026-05-27T00:00:00+00:00",
+                        "start_date": "2026-05-27T01:00:00Z",
+                        "state": "failed",
+                    },
+                ],
+                "total_entries": 3,
+            },
+            "RestApiStatusCode": 200,
+        }
+
+        # Freeze "now" so the cutoff (now - days) is deterministic.
+        import datetime as _dt
+
+        class _FixedDT(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return _dt.datetime(2026, 5, 27, 12, 0, 0, tzinfo=tz)
+
+        with patch("awslabs.mwaa_mcp_server.tools.datetime", _FixedDT):
+            result = await mwaa_tools.list_recent_failures(
+                environment_name="test-env",
+                days=3,  # cutoff = 2026-05-24T12:00:00Z
+            )
+
+        tis = result.get("task_instances") or []
+        ids = [t["task_id"] for t in tis]
+        # Ancient task must be filtered out
+        assert "ancient_task" not in ids
+        # Both recent ones must be present, newest first
+        assert ids == ["recent_task_new", "recent_task_old"]
+        # Summary should expose what we did
+        summary = result.get("summary", {})
+        assert summary.get("client_filtered_count") == 2
+        assert summary.get("client_sorted") == "start_date desc"
+
+    @pytest.mark.asyncio
+    async def test_dag_id_mode_filters_old_failures(
+        self, mwaa_tools, mock_boto_client
+    ):
+        # When dag_id is passed we use the dag_runs endpoint; same kind of
+        # client-side filter applies. Existing code already had it for this
+        # branch — this test guards against future regressions.
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {
+                "dag_runs": [
+                    {
+                        "dag_run_id": "scheduled__2026-02-22T00:35:00+00:00",
+                        "start_date": "2026-02-22T00:55:31Z",
+                        "state": "failed",
+                    },
+                    {
+                        "dag_run_id": "scheduled__2026-05-26T00:00:00+00:00",
+                        "start_date": "2026-05-26T01:00:00Z",
+                        "state": "failed",
+                    },
+                ],
+                "total_entries": 2,
+            },
+            "RestApiStatusCode": 200,
+        }
+
+        import datetime as _dt
+
+        class _FixedDT(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return _dt.datetime(2026, 5, 27, 12, 0, 0, tzinfo=tz)
+
+        with patch("awslabs.mwaa_mcp_server.tools.datetime", _FixedDT):
+            result = await mwaa_tools.list_recent_failures(
+                environment_name="test-env",
+                dag_id="my_dag",
+                days=3,
+            )
+
+        runs = result.get("dag_runs") or []
+        ids = [r["dag_run_id"] for r in runs]
+        assert "scheduled__2026-02-22T00:35:00+00:00" not in ids
+        assert "scheduled__2026-05-26T00:00:00+00:00" in ids

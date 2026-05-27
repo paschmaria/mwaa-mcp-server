@@ -7,9 +7,6 @@ rather than the whole 50KB blob.
 
 The patterns here are intentionally framework-agnostic: Python tracebacks,
 Python exceptions, Airflow's task-failure markers, and non-zero exit codes.
-Anyone running domain-specific frameworks on Airflow (dbt, Spark, Beam, ML
-pipelines, etc.) can extend this by passing additional matchers — see the
-docstring on ``summarize_log``.
 """
 
 from __future__ import annotations

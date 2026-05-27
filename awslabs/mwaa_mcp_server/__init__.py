@@ -4,4 +4,4 @@ from .server import mcp
 from .tools import MWAATools
 
 __all__ = ["mcp", "MWAATools"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

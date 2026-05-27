@@ -138,6 +138,29 @@ class MWAATools:
             response = self.mwaa_client.invoke_rest_api(**params)
             return response
 
+        except ClientError as e:
+            # MWAA's RestApiClientException / RestApiServerException are
+            # ClientError subclasses. The boto wrapper's str() is often empty
+            # (e.g. "An error occurred (RestApiClientException) ... : ").
+            # The actual diagnostic info lives in e.response — surface the
+            # HTTP status code from Airflow and any response body so callers
+            # can see what really failed (404 for a removed endpoint, 422 for
+            # a bad param, etc.) instead of getting an opaque empty error.
+            err_info = e.response.get("Error") or {}
+            err_code = err_info.get("Code")
+            err_msg = err_info.get("Message") or ""
+            rest_status = e.response.get("RestApiStatusCode")
+            rest_body = e.response.get("RestApiResponse")
+            logger.error(
+                "Error invoking Airflow API %s %s: code=%s msg=%s status=%s body=%s",
+                method, path, err_code, err_msg, rest_status, rest_body,
+            )
+            return {
+                "error": err_msg or str(e),
+                "error_code": err_code,
+                "rest_api_status_code": rest_status,
+                "rest_api_response": rest_body,
+            }
         except Exception as e:
             logger.error("Error invoking Airflow API %s %s: %s", method, path, e)
             return {"error": str(e)}
@@ -710,7 +733,7 @@ class MWAATools:
         ti_states = ["failed"]
         if include_upstream_failed:
             ti_states.append("upstream_failed")
-        return await self.list_task_instances(
+        result = await self.list_task_instances(
             environment_name=environment_name,
             start_date_gte=cutoff,
             state=ti_states,
@@ -718,6 +741,25 @@ class MWAATools:
             page=1,
             page_size=min(limit, DEFAULT_PAGE_SIZE),
         )
+        if "error" in result:
+            return result
+
+        # Airflow's batch task-instances endpoint silently ignores
+        # ``start_date_gte`` and defaults to oldest-first ordering. Without
+        # client-side handling, the "most recent failures in the last N days"
+        # contract is broken — callers got months-old failures instead of
+        # the recent ones they asked for. Filter + sort here so the surface
+        # behavior matches the docstring.
+        tis = result.get("task_instances", []) or []
+        tis = [t for t in tis if (t.get("start_date") or "") >= cutoff]
+        tis.sort(key=lambda t: t.get("start_date") or "", reverse=True)
+        result["task_instances"] = tis
+        summary = result.get("summary") or {}
+        summary["client_filtered_cutoff"] = cutoff
+        summary["client_filtered_count"] = len(tis)
+        summary["client_sorted"] = "start_date desc"
+        result["summary"] = summary
+        return result
 
     async def summarize_task_failure(
         self,
@@ -730,16 +772,19 @@ class MWAATools:
     ) -> Dict[str, Any]:
         """Fetch a task's log and return the lines that explain the failure.
 
-        Runs heuristic matchers for dbt FAIL/ERROR/Runtime Error, Python
-        tracebacks/exceptions, Airflow "Task failed" markers, and non-zero
-        exit codes. Returns:
+        Runs framework-agnostic heuristic matchers (Python tracebacks/
+        exceptions, Airflow "Task failed" markers, non-zero exit codes) and
+        returns matched lines with surrounding context plus a headline
+        synopsis. Returns:
 
             {
-              "headline": "...",            # one-line synopsis
-              "dbt_done_stats": {...},      # if dbt ran a build
-              "dbt_test_failures": [...],   # each with line_no + context
-              "python_exceptions": [...],
-              ...
+              "summary": {...},                   # echo of the request args
+              "headline": "...",                  # one-line synopsis
+              "python_exceptions": [...],         # each with line_no + context
+              "python_tracebacks": [...],
+              "airflow_task_failures": [...],
+              "non_zero_exits": [...],
+              "total_lines": int,
               "resource_uri": "mwaa://logs/...",  # full log if needed
             }
         """
