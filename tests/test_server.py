@@ -284,7 +284,11 @@ class TestAirflowApiTools:
         result = await mwaa_tools.get_import_errors("test-env")
 
         call_args = mock_boto_client.invoke_rest_api.call_args
-        assert "/dags/importErrors" in call_args.kwargs["Path"]
+        path = call_args.kwargs["Path"]
+        # Airflow 3.x: top-level /importErrors (not /dags/importErrors,
+        # which was being parsed as /dags/{dag_id="importErrors"}).
+        assert path.startswith("/importErrors")
+        assert "/dags/importErrors" not in path
 
 
 class TestAirflowApiErrorSurfacing:
@@ -558,3 +562,148 @@ class TestGetDagRunHeatmap:
         # logical_date is inside the window.
         assert "2026-05-26" in result["execution_dates"]
         assert "queued_then_failed" in result["task_ids"]
+
+
+class TestGetDagSourceTwoStep:
+    """Airflow 3.x removed ``/dags/{dag_id}/dagSource`` (returns 404 "API
+    route not found"). The replacement is a two-step flow:
+
+    1. ``GET /dags/{dag_id}`` returns a ``file_token`` for the DAG file
+    2. ``GET /dagSources/{file_token}`` returns the source
+
+    These tests guard against regressing to the broken single-call form.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_step_flow(self, mwaa_tools, mock_boto_client):
+        # First call to /dags/{dag_id} returns file_token; second call to
+        # /dagSources/{file_token} returns source text.
+        mock_boto_client.invoke_rest_api.side_effect = [
+            {
+                "RestApiResponse": {
+                    "dag_id": "my_dag",
+                    "file_token": "ABCDEF_token_xyz",
+                },
+                "RestApiStatusCode": 200,
+            },
+            {
+                "RestApiResponse": {"content": "from airflow import DAG\n..."},
+                "RestApiStatusCode": 200,
+            },
+        ]
+
+        result = await mwaa_tools.get_dag_source("test-env", "my_dag")
+
+        # Two boto calls in order.
+        assert mock_boto_client.invoke_rest_api.call_count == 2
+        first_path = mock_boto_client.invoke_rest_api.call_args_list[0].kwargs["Path"]
+        second_path = mock_boto_client.invoke_rest_api.call_args_list[1].kwargs["Path"]
+        assert first_path == "/dags/my_dag"
+        assert second_path == "/dagSources/ABCDEF_token_xyz"
+        # Second call's response is what get_dag_source returns.
+        assert result.get("RestApiResponse", {}).get("content", "").startswith("from airflow")
+        # Old broken path must not appear anywhere.
+        all_paths = [
+            c.kwargs["Path"]
+            for c in mock_boto_client.invoke_rest_api.call_args_list
+        ]
+        assert not any("/dagSource" in p and "/dagSources/" not in p for p in all_paths)
+
+    @pytest.mark.asyncio
+    async def test_missing_file_token_returns_error_without_second_call(
+        self, mwaa_tools, mock_boto_client
+    ):
+        # If Airflow's /dags/{dag_id} response doesn't include a file_token
+        # (shouldn't happen in 3.x, but guard against it), we must not call
+        # /dagSources/None — return an explicit error instead.
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {"dag_id": "my_dag"},  # no file_token
+            "RestApiStatusCode": 200,
+        }
+
+        result = await mwaa_tools.get_dag_source("test-env", "my_dag")
+
+        assert "error" in result
+        assert "file_token" in result["error"]
+        # Only the first call should have happened.
+        assert mock_boto_client.invoke_rest_api.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_propagates_first_call_error(self, mwaa_tools, mock_boto_client):
+        # If /dags/{dag_id} errors (e.g. DAG doesn't exist), bubble that up
+        # rather than trying the second call against an unknown file_token.
+        mock_boto_client.invoke_rest_api.side_effect = ClientError(
+            error_response={
+                "Error": {"Code": "RestApiClientException", "Message": ""},
+                "RestApiStatusCode": 404,
+                "RestApiResponse": {"detail": "DAG not found"},
+            },
+            operation_name="InvokeRestApi",
+        )
+
+        result = await mwaa_tools.get_dag_source("test-env", "missing_dag")
+
+        assert result.get("rest_api_status_code") == 404
+        # Only one call attempted.
+        assert mock_boto_client.invoke_rest_api.call_count == 1
+
+
+class TestListTaskInstancesOrderBy:
+    """``list_task_instances`` must default to newest-first ordering.
+
+    Airflow's batch task-instances endpoint defaults to oldest-first when
+    no ``order_by`` is sent, which made "what failed in the last 3 days?"
+    queries return months-old rows. The fix sends ``order_by=-start_date``
+    by default; this test guards against regressing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_order_by_is_start_date_desc(
+        self, mwaa_tools, mock_boto_client
+    ):
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {"task_instances": [], "total_entries": 0},
+            "RestApiStatusCode": 200,
+        }
+
+        await mwaa_tools.list_task_instances(environment_name="test-env")
+
+        path = mock_boto_client.invoke_rest_api.call_args.kwargs["Path"]
+        # The order_by gets URL-encoded into the query string.
+        assert "order_by=-start_date" in path
+
+    @pytest.mark.asyncio
+    async def test_explicit_order_by_is_respected(
+        self, mwaa_tools, mock_boto_client
+    ):
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {"task_instances": [], "total_entries": 0},
+            "RestApiStatusCode": 200,
+        }
+
+        await mwaa_tools.list_task_instances(
+            environment_name="test-env", order_by="end_date"
+        )
+
+        path = mock_boto_client.invoke_rest_api.call_args.kwargs["Path"]
+        assert "order_by=end_date" in path
+        assert "order_by=-start_date" not in path
+
+    @pytest.mark.asyncio
+    async def test_list_recent_failures_ti_mode_passes_order_by(
+        self, mwaa_tools, mock_boto_client
+    ):
+        # Without a dag_id, list_recent_failures goes through the batch
+        # task-instances endpoint. It must push order_by=-start_date so
+        # Airflow returns the recent rows, not the first N oldest.
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {"task_instances": [], "total_entries": 0},
+            "RestApiStatusCode": 200,
+        }
+
+        await mwaa_tools.list_recent_failures(
+            environment_name="test-env", days=3
+        )
+
+        path = mock_boto_client.invoke_rest_api.call_args.kwargs["Path"]
+        assert "order_by=-start_date" in path

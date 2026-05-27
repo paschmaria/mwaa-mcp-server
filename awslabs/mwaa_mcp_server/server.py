@@ -646,6 +646,7 @@ async def list_task_instances(
     queue: Optional[str] = None,
     duration_gte: Optional[float] = None,
     duration_lte: Optional[float] = None,
+    order_by: Optional[str] = "-start_date",
     limit: Optional[int] = 100,
     offset: Optional[int] = 0,
     page: Optional[int] = 1,
@@ -674,6 +675,9 @@ async def list_task_instances(
         queue: Filter by queue name
         duration_gte: Filter by minimum duration in seconds
         duration_lte: Filter by maximum duration in seconds
+        order_by: Airflow sort key. Default ``-start_date`` (newest first).
+            Pass ``"start_date"`` for oldest-first or ``None`` to let Airflow
+            pick its default (which is oldest-first on this endpoint).
         limit: Number of items to return (default 100)
         offset: Number of items to skip for pagination
 
@@ -707,6 +711,7 @@ async def list_task_instances(
         queue=queue,
         duration_gte=duration_gte_float,
         duration_lte=duration_lte_float,
+        order_by=order_by,
         limit=limit_int,
         offset=offset_int,
         page=int(page) if page else 1,
@@ -842,7 +847,7 @@ async def dag_runs_page(
     "mwaa://task_instances/{environment_name}/{dag_id}/{dag_run_id}"
     "{?page,page_size,limit,offset,state,start_date_gte,start_date_lte,"
     "end_date_gte,end_date_lte,execution_date_gte,execution_date_lte,"
-    "pool,queue,duration_gte,duration_lte}",
+    "pool,queue,duration_gte,duration_lte,order_by}",
     name="task_instances_page",
     mime_type="application/json",
 )
@@ -865,6 +870,7 @@ async def task_instances_page(
     queue: Optional[str] = None,
     duration_gte: Optional[str] = None,
     duration_lte: Optional[str] = None,
+    order_by: Optional[str] = "-start_date",
 ) -> str:
     """Follow-up slice of list_task_instances. Same envelope as the tool."""
     # The wildcards ('~') don't survive URL path matching cleanly; treat them
@@ -887,6 +893,7 @@ async def task_instances_page(
         queue=queue,
         duration_gte=float(duration_gte) if duration_gte else None,
         duration_lte=float(duration_lte) if duration_lte else None,
+        order_by=order_by,
         limit=int(limit) if limit else 100,
         offset=int(offset) if offset else 0,
         page=int(page) if page else 1,
