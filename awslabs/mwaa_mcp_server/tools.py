@@ -574,6 +574,22 @@ class MWAATools:
         body = raw.get("RestApiResponse") or {}
         instances = body.get("task_instances", []) or []
 
+        # Airflow's batch task-instances endpoint silently ignores
+        # ``start_date_gte`` (same bug class as list_recent_failures).
+        # Without a client-side filter the heatmap returns the full
+        # history of the DAG instead of the requested window — e.g.
+        # ``days=7`` came back with cells from three months ago.
+        # ``_derive_execution_date`` is used rather than ``start_date``
+        # because failed-before-start task instances (queued -> failed)
+        # have null start_date and would be excluded entirely; the
+        # helper falls back to logical_date / run_after / parsing the
+        # dag_run_id prefix.
+        cutoff_date = cutoff[:10]  # "YYYY-MM-DD"
+        instances = [
+            ti for ti in instances
+            if _derive_execution_date(ti) >= cutoff_date
+        ]
+
         # Collapse to most-recent-try per (task_id, execution_date).
         best: Dict[tuple, Dict[str, Any]] = {}
         for ti in instances:
@@ -613,6 +629,7 @@ class MWAATools:
                 "task_count": len(task_ids),
                 "run_date_count": len(execution_dates),
                 "cell_count": len(cells),
+                "client_filtered_cutoff_date": cutoff_date,
             },
             "task_ids": task_ids,
             "execution_dates": execution_dates,
