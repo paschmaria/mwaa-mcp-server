@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "awslabs.mwaa-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "AWS MWAA MCP Server for managing Amazon Managed Workflows for Apache Airflow environments and Airflow operations"
 readme = "README.md"
 requires-python = ">=3.10"
