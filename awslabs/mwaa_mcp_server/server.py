@@ -602,8 +602,8 @@ async def summarize_task_failure(
     """Extract just the failure-relevant lines from a task instance's log.
 
     Replaces the "get_task_logs → grep for FAIL/Exception" pattern. Pulls the
-    full log, runs heuristics for dbt FAIL/ERROR, Python tracebacks/exceptions,
-    Airflow task-failed markers, and non-zero exit codes, and returns matched
+    full log, runs framework-agnostic heuristics (Python tracebacks/exceptions,
+    Airflow task-failed markers, non-zero exit codes), and returns matched
     lines with surrounding context plus a headline synopsis.
 
     Use this for triage. Use ``get_task_logs`` only if you need the raw text.
@@ -617,7 +617,8 @@ async def summarize_task_failure(
         context_lines: Lines of context before/after each match (default 4)
 
     Returns:
-        {summary, headline, dbt_test_failures, python_exceptions, ..., resource_uri}
+        ``{summary, headline, python_exceptions, python_tracebacks,
+        airflow_task_failures, non_zero_exits, total_lines, resource_uri}``
     """
     return await tools.summarize_task_failure(
         environment_name,

@@ -789,16 +789,19 @@ class MWAATools:
     ) -> Dict[str, Any]:
         """Fetch a task's log and return the lines that explain the failure.
 
-        Runs heuristic matchers for dbt FAIL/ERROR/Runtime Error, Python
-        tracebacks/exceptions, Airflow "Task failed" markers, and non-zero
-        exit codes. Returns:
+        Runs framework-agnostic heuristic matchers (Python tracebacks/
+        exceptions, Airflow "Task failed" markers, non-zero exit codes) and
+        returns matched lines with surrounding context plus a headline
+        synopsis. Returns:
 
             {
-              "headline": "...",            # one-line synopsis
-              "dbt_done_stats": {...},      # if dbt ran a build
-              "dbt_test_failures": [...],   # each with line_no + context
-              "python_exceptions": [...],
-              ...
+              "summary": {...},                   # echo of the request args
+              "headline": "...",                  # one-line synopsis
+              "python_exceptions": [...],         # each with line_no + context
+              "python_tracebacks": [...],
+              "airflow_task_failures": [...],
+              "non_zero_exits": [...],
+              "total_lines": int,
               "resource_uri": "mwaa://logs/...",  # full log if needed
             }
         """
