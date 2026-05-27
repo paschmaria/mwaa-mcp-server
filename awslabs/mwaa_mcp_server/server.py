@@ -18,11 +18,13 @@ from .ui_templates import (
     RUN_HEATMAP_URI,
 )
 
-# CSP shared by all MCP App resources — allow scripts/styles from unpkg
-# (Mermaid + the MCP Apps SDK), nothing else.
+# CSP shared by all MCP App resources. esm.sh is used for the MCP Apps
+# SDK (it resolves the package main + bundles transitive deps, which
+# the legacy ``/app-with-deps`` subpath used to do on unpkg before
+# being removed in 1.x). unpkg is kept for Mermaid.
 _UI_CSP = ResourceCSP(
-    connect_domains=["https://unpkg.com"],
-    resource_domains=["https://unpkg.com"],
+    connect_domains=["https://unpkg.com", "https://esm.sh"],
+    resource_domains=["https://unpkg.com", "https://esm.sh"],
 )
 
 # Set up logging
@@ -502,6 +504,10 @@ async def get_dag_graph(
 @mcp.resource(
     DAG_GRAPH_URI,
     name="dag_graph_ui",
+    # MCP Apps spec — hosts only render resources with this MIME as
+    # interactive widgets. Without it the host treats the HTML as a
+    # text blob and renders nothing visible.
+    mime_type="text/html;profile=mcp-app",
     app=AppConfig(csp=_UI_CSP),
 )
 async def dag_graph_ui() -> str:
@@ -541,6 +547,7 @@ async def get_dag_run_heatmap(
 @mcp.resource(
     RUN_HEATMAP_URI,
     name="run_heatmap_ui",
+    mime_type="text/html;profile=mcp-app",
     app=AppConfig(csp=_UI_CSP),
 )
 async def run_heatmap_ui() -> str:
