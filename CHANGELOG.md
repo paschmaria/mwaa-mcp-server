@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- `_invoke_airflow_api` now surfaces the underlying Airflow HTTP status code and response body when MWAA returns `RestApiClientException` / `RestApiServerException`. Previously these came back as `{"error": "An error occurred (RestApiClientException) ... : "}` with no diagnostic information — callers couldn't tell a 404 (endpoint missing/renamed in Airflow 3.x) from a 422 (bad param) from a 5xx. Errors now also include `error_code`, `rest_api_status_code`, and `rest_api_response` fields.
+- `list_recent_failures` (task-instance mode) now actually returns recent failures. Airflow's batch task-instances endpoint silently ignores `start_date_gte` and defaults to oldest-first ordering, so the previous implementation returned months-old failures in response to a `days=3` query. Now applies the date filter and newest-first sort client-side, with the cutoff exposed in the summary as `client_filtered_cutoff` / `client_filtered_count` / `client_sorted`.
+
+### Added
+- `summarize_log` (and therefore `summarize_task_failure`) now extracts dbt failure patterns: per-test `N of M FAIL/ERROR` status lines, `Failure in test ...` detail blocks, and `Runtime Error in model ...` adapter errors. The `Done. PASS=X WARN=Y ERROR=Z TOTAL=N` summary line is parsed into a numeric `dbt_done_stats` dict; the `NO-OP` capture group is optional so older dbt versions that don't emit it still parse. dbt failures take headline priority over the generic Airflow "Task failed" wrapper because in Cosmos/dbt deployments the dbt line is the diagnostic one.
+- 11 new tests covering the dbt extraction, headline priority, the boto error-surfacing path, and the client-side filter/sort in `list_recent_failures` (both task-instance and dag-id branches).
+
 ## [0.1.0] - 2026-03-06
 
 ### Changed
