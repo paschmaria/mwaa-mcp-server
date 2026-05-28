@@ -370,9 +370,28 @@ class MWAATools:
         return self._invoke_airflow_api(environment_name, "GET", f"/dags/{dag_id}")
 
     async def get_dag_source(self, environment_name: str, dag_id: str) -> Dict[str, Any]:
-        """Get DAG source code via Airflow API."""
+        """Get DAG source code via Airflow API (Airflow 3.x two-step flow).
+
+        This is a two-step flow: ``GET /dags/{dag_id}`` returns a ``file_token``
+        that opaquely identifies the DAG file, then ``GET /dagSources/{file_token}``
+        returns the source. We do both calls here so the public surface stays one-shot.
+        """
+        dag_response = self._invoke_airflow_api(
+            environment_name, "GET", f"/dags/{dag_id}"
+        )
+        if "error" in dag_response:
+            return dag_response
+
+        body = dag_response.get("RestApiResponse") or {}
+        file_token = body.get("file_token")
+        if not file_token:
+            return {
+                "error": f"DAG '{dag_id}' response had no file_token",
+                "dag_id": dag_id,
+            }
+
         return self._invoke_airflow_api(
-            environment_name, "GET", f"/dags/{dag_id}/dagSource"
+            environment_name, "GET", f"/dagSources/{file_token}"
         )
 
     async def trigger_dag_run(
@@ -574,11 +593,8 @@ class MWAATools:
         body = raw.get("RestApiResponse") or {}
         instances = body.get("task_instances", []) or []
 
-        # Airflow's batch task-instances endpoint silently ignores
-        # ``start_date_gte`` (same bug class as list_recent_failures).
-        # Without a client-side filter the heatmap returns the full
-        # history of the DAG instead of the requested window — e.g.
-        # ``days=7`` came back with cells from three months ago.
+        # Without a client-side filter the heatmap returns the 
+        # full history of the DAG instead of the requested window.
         # ``_derive_execution_date`` is used rather than ``start_date``
         # because failed-before-start task instances (queued -> failed)
         # have null start_date and would be excluded entirely; the
@@ -722,10 +738,6 @@ class MWAATools:
         if dag_id:
             # DAG runs only have ``failed`` — ``upstream_failed`` is a task
             # instance state and Airflow's validator rejects it here.
-            #
-            # Airflow's REST API silently ignores execution_date_gte on this
-            # endpoint, so we send it (in case behavior changes) AND apply a
-            # client-side filter on start_date below.
             result = await self.list_dag_runs(
                 environment_name=environment_name,
                 dag_id=dag_id,
@@ -750,10 +762,17 @@ class MWAATools:
         ti_states = ["failed"]
         if include_upstream_failed:
             ti_states.append("upstream_failed")
+        # ``order_by=-start_date`` is now passed server-side so Airflow
+        # returns the recent rows first. Without it the batch endpoint
+        # defaulted to oldest-first and we never saw recent failures
+        # when the env had a long failure history. The client-side
+        # filter+sort below stays as belt-and-braces for Airflow versions
+        # that ignore order_by here.
         result = await self.list_task_instances(
             environment_name=environment_name,
             start_date_gte=cutoff,
             state=ti_states,
+            order_by="-start_date",
             limit=limit,
             page=1,
             page_size=min(limit, DEFAULT_PAGE_SIZE),
@@ -761,9 +780,8 @@ class MWAATools:
         if "error" in result:
             return result
 
-        # Airflow's batch task-instances endpoint silently ignores
-        # ``start_date_gte`` and defaults to oldest-first ordering. Without
-        # client-side handling, the "most recent failures in the last N days"
+        # Airflow's batch task-instances endpoint defaults to oldest-first ordering.
+        # Without client-side handling, the "most recent failures in the last N days"
         # contract is broken — callers got months-old failures instead of
         # the recent ones they asked for. Filter + sort here so the surface
         # behavior matches the docstring.
@@ -843,6 +861,7 @@ class MWAATools:
         queue: Optional[str] = None,
         duration_gte: Optional[float] = None,
         duration_lte: Optional[float] = None,
+        order_by: Optional[str] = "-start_date",
         limit: Optional[int] = 100,
         offset: Optional[int] = 0,
         page: int = 1,
@@ -855,6 +874,11 @@ class MWAATools:
         - dag_run_id='~' means all DAG runs
         
         This enables time-range queries to find all tasks running in a specific window.
+
+        Defaults to ``order_by="-start_date"`` (newest first). Airflow's
+        batch endpoint defaults to oldest-first when no ``order_by`` is
+        passed, which made "what failed recently?" queries return months-old
+        rows because they're earlier in the result set.
         """
         # Use wildcards if not specified
         dag_path = dag_id if dag_id else "~"
@@ -892,6 +916,11 @@ class MWAATools:
             params["duration_gte"] = duration_gte
         if duration_lte is not None:
             params["duration_lte"] = duration_lte
+
+        # Order: newest-first by default so callers don't have to walk
+        # pages of oldest rows to find the recent ones.
+        if order_by:
+            params["order_by"] = order_by
         
         endpoint = f"/dags/{dag_path}/dagRuns/{run_path}/taskInstances"
         raw = self._invoke_airflow_api(environment_name, "GET", endpoint, params=params)
@@ -908,6 +937,7 @@ class MWAATools:
                 "dag_id": dag_id,
                 "dag_run_id": dag_run_id,
                 "total_entries_reported_by_airflow": total,
+                "order_by": order_by,
                 "filters": {
                     "state": state,
                     "start_date_gte": start_date_gte,
@@ -940,6 +970,7 @@ class MWAATools:
                 "queue": queue,
                 "duration_gte": duration_gte,
                 "duration_lte": duration_lte,
+                "order_by": order_by,
             },
             item_key="task_instances",
         )
@@ -977,5 +1008,5 @@ class MWAATools:
         """Get import errors via Airflow API."""
         params: Dict[str, Any] = {"limit": limit, "offset": offset}
         return self._invoke_airflow_api(
-            environment_name, "GET", "/dags/importErrors", params=params
+            environment_name, "GET", "/importErrors", params=params
         )
