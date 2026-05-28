@@ -67,6 +67,91 @@ def _build_mermaid(
     return "\n".join(lines)
 
 
+# Single-character glyph per Airflow task instance state. Mirrors the colour
+# palette used by ``ui://mwaa/run-heatmap`` so the text grid carries the same
+# semantics. Anything not in this table falls through to ``?``.
+_HEATMAP_GLYPHS = {
+    "success": "✓",
+    "failed": "✗",
+    "upstream_failed": "↑",
+    "skipped": "·",
+    "running": "▶",
+    "queued": "?",
+    "deferred": "?",
+    "scheduled": "?",
+    "up_for_reschedule": "?",
+    "up_for_retry": "?",
+    "restarting": "▶",
+    "removed": "·",
+}
+
+
+def _build_heatmap_text(
+    task_ids: List[str],
+    execution_dates: List[str],
+    cells: List[Dict[str, Any]],
+    max_task_id_len: int = 35,
+) -> str:
+    """Build an ASCII heatmap of (task_id × execution_date) states.
+
+    Mirrors what the ``ui://mwaa/run-heatmap`` MCP App widget renders, for
+    hosts without MCP Apps support — or as a fallback when the widget fails
+    to render. Task IDs longer than ``max_task_id_len`` are truncated with
+    an ellipsis. Missing cells (no run on that date for that task) render
+    as blank.
+
+    The output is deterministic given the same inputs so it round-trips
+    cleanly through copy-paste, Slack snippets, Jira comments, etc.
+    """
+    if not task_ids or not execution_dates:
+        return "(no runs in the requested window)"
+
+    cell_index = {(c["task_id"], c["execution_date"]): c for c in cells}
+
+    def truncate(tid: str) -> str:
+        if len(tid) > max_task_id_len:
+            return tid[: max_task_id_len - 1] + "…"
+        return tid
+
+    failed_count = sum(
+        1 for c in cells if c.get("state") in ("failed", "upstream_failed")
+    )
+
+    # Each date renders as DD (2 chars) joined by single spaces. Each glyph
+    # renders right-justified in 2 chars so it sits under the second digit
+    # of its date — close enough alignment without exotic padding logic.
+    date_hdr = " ".join(d[8:10] for d in execution_dates)
+    header = f"{'Task'.ljust(max_task_id_len)}  {date_hdr}"
+
+    rows: List[str] = []
+    rows.append(
+        f"{len(task_ids)} tasks × {len(execution_dates)} runs"
+        f" · {failed_count} failure(s)"
+    )
+    rows.append("")
+    rows.append(header)
+    rows.append("-" * len(header))
+
+    for tid in task_ids:
+        glyphs: List[str] = []
+        for d in execution_dates:
+            cell = cell_index.get((tid, d))
+            state = cell.get("state") if cell else None
+            if state is None:
+                glyphs.append(" ")
+            else:
+                glyphs.append(_HEATMAP_GLYPHS.get(state, "?"))
+        glyph_str = " ".join(g.rjust(2) for g in glyphs)
+        rows.append(f"{truncate(tid).ljust(max_task_id_len)}  {glyph_str}")
+
+    rows.append("")
+    rows.append(
+        "Legend: ✓ success  ✗ failed  ↑ upstream_failed  · skipped  "
+        "▶ running  ? other"
+    )
+    return "\n".join(rows)
+
+
 class MWAATools:
     """Tools for interacting with Amazon MWAA."""
 
@@ -563,9 +648,13 @@ class MWAATools:
         - ``task_ids``: deduped, alphabetically ordered
         - ``execution_dates``: deduped, ascending ISO dates
         - ``cells``: [{task_id, execution_date, state, dag_run_id, ...}]
+        - ``text_grid``: pre-rendered ASCII heatmap (single-char glyphs per
+          state), matching what the ``ui://mwaa/run-heatmap`` widget shows.
+          Hosts without MCP Apps and LLMs reading the structured payload
+          both get a usable view without re-deriving it from ``cells``.
 
         Hosts with MCP Apps support render this as a clickable grid; text
-        hosts can scan ``cells`` directly.
+        hosts can read ``text_grid`` or scan ``cells`` directly.
         """
         # Airflow's REST API wants ISO with 'Z' (not '+00:00') and without
         # microseconds — match its examples.
@@ -653,6 +742,7 @@ class MWAATools:
             "task_ids": task_ids,
             "execution_dates": execution_dates,
             "cells": cells,
+            "text_grid": _build_heatmap_text(task_ids, execution_dates, cells),
         }
 
     async def get_dag_graph(
