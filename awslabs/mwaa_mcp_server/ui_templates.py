@@ -51,9 +51,13 @@ DAG_GRAPH_HTML = """<!DOCTYPE html>
   </div>
 
   <script type="module">
-    // esm.sh resolves the package main and bundles transitive deps —
-    // the legacy ``/app-with-deps`` subpath on unpkg was removed in 1.x.
-    import { App } from "https://esm.sh/@modelcontextprotocol/ext-apps@1.7.1";
+    // ``?bundle`` forces esm.sh to inline all transitive deps (zod, etc.)
+    // into a single response. Without it the SDK module loads but its
+    // ``zod`` import resolves from an esm.sh subdomain that the iframe's
+    // CSP ``connect-src`` doesn't allow, leaving zod half-loaded and
+    // crashing at ``types.ts:22`` with ``TypeError: t.custom is not a
+    // function`` the moment the SDK calls ``zod.custom(...)``.
+    import { App } from "https://esm.sh/@modelcontextprotocol/ext-apps@1.7.1?bundle";
     import mermaid from "https://unpkg.com/mermaid@10/dist/mermaid.esm.min.mjs";
 
     mermaid.initialize({ startOnLoad: false, theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' });
@@ -183,9 +187,13 @@ RUN_HEATMAP_HTML = """<!DOCTYPE html>
   <div class="legend" id="legend"></div>
 
   <script type="module">
-    // esm.sh resolves the package main and bundles transitive deps —
-    // the legacy ``/app-with-deps`` subpath on unpkg was removed in 1.x.
-    import { App } from "https://esm.sh/@modelcontextprotocol/ext-apps@1.7.1";
+    // ``?bundle`` forces esm.sh to inline all transitive deps (zod, etc.)
+    // into a single response. Without it the SDK module loads but its
+    // ``zod`` import resolves from an esm.sh subdomain that the iframe's
+    // CSP ``connect-src`` doesn't allow, leaving zod half-loaded and
+    // crashing at ``types.ts:22`` with ``TypeError: t.custom is not a
+    // function`` the moment the SDK calls ``zod.custom(...)``.
+    import { App } from "https://esm.sh/@modelcontextprotocol/ext-apps@1.7.1?bundle";
 
     const titleEl = document.getElementById('title');
     const metaEl = document.getElementById('meta');
