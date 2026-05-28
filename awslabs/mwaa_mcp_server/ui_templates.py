@@ -2,6 +2,13 @@
 
 Each template loads the MCP Apps SDK from unpkg, receives tool output via
 ``ontoolresult``, and renders an interactive view. Vanilla JS — no build step.
+
+Each template also includes render-failure visibility: a non-module pre-script
+catches any uncaught error (including ES module import failures from the
+SDK CDN), surfaces it in the iframe content area, and logs a structured
+marker ``[mcp-app:render_failed]`` to the console for telemetry capture.
+Successful renders log ``[mcp-app:render_ok]``. The widget never silently
+freezes at "Waiting for tool output..." again.
 """
 
 DAG_GRAPH_URI = "ui://mwaa/dag-graph"
@@ -35,6 +42,8 @@ DAG_GRAPH_HTML = """<!DOCTYPE html>
       background: var(--bg);
     }
     .error { color: #cf222e; padding: 12px; }
+    .error code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .error .src { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; }
     .mermaid { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     button.copy {
       background: transparent; border: 1px solid var(--border); border-radius: 6px;
@@ -49,6 +58,42 @@ DAG_GRAPH_HTML = """<!DOCTYPE html>
   <div class="graph-wrap" id="wrap">
     <div id="content">Waiting for tool output...</div>
   </div>
+
+  <script>
+    // Render-failure visibility — non-module so it runs BEFORE the module
+    // script's imports, catching CDN / CSP / transitive-dep failures (e.g.
+    // the zod ``t.custom is not a function`` class) that would otherwise
+    // leave the iframe stuck at "Waiting for tool output..." with no
+    // user-visible signal. Logs ``[mcp-app:render_failed]`` for telemetry.
+    (function () {
+      var URI = "ui://mwaa/dag-graph";
+      function showFailure(label, detail) {
+        var el = document.getElementById('content');
+        if (el) {
+          el.innerHTML =
+            '<div class="error"><strong>Widget failed to render</strong><br>' +
+            '<code>' + (label || 'unknown error') + '</code>' +
+            (detail ? '<span class="src">' + detail + '</span>' : '') +
+            '</div>';
+        }
+        console.error('[mcp-app:render_failed]', { uri: URI, error: label, detail: detail || null });
+      }
+      window.addEventListener('error', function (e) {
+        var msg = (e.error && e.error.message) || e.message || 'Unknown script error';
+        var src = e.filename ? (e.filename + ':' + (e.lineno || '?')) : '';
+        showFailure(msg, src);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var reason = e.reason;
+        var msg = (reason && reason.message) || (typeof reason === 'string' ? reason : 'Promise rejected');
+        showFailure(msg, '');
+      });
+      // Exposed for the module script below to mark a successful render.
+      window.__mcpAppRenderOk = function (extra) {
+        console.info('[mcp-app:render_ok]', Object.assign({ uri: URI, timestamp: Date.now() }, extra || {}));
+      };
+    })();
+  </script>
 
   <script type="module">
     // ``?bundle`` forces esm.sh to inline all transitive deps (zod, etc.)
@@ -86,6 +131,9 @@ DAG_GRAPH_HTML = """<!DOCTYPE html>
       try {
         const { svg } = await mermaid.render('dag-svg', mermaidSrc);
         contentEl.innerHTML = svg;
+        if (window.__mcpAppRenderOk) {
+          window.__mcpAppRenderOk({ nodes: nodeCount, edges: edgeCount });
+        }
       } catch (err) {
         renderError(`Mermaid render error: ${err.message}`);
       }
@@ -177,6 +225,8 @@ RUN_HEATMAP_HTML = """<!DOCTYPE html>
       z-index: 99; display: none; max-width: 320px;
     }
     .error { color: var(--failed); padding: 12px; }
+    .error code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .error .src { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -185,6 +235,37 @@ RUN_HEATMAP_HTML = """<!DOCTYPE html>
   <div id="content">Waiting for tool output...</div>
   <div id="tip" class="tip"></div>
   <div class="legend" id="legend"></div>
+
+  <script>
+    // Render-failure visibility — see DAG_GRAPH_HTML for rationale.
+    (function () {
+      var URI = "ui://mwaa/run-heatmap";
+      function showFailure(label, detail) {
+        var el = document.getElementById('content');
+        if (el) {
+          el.innerHTML =
+            '<div class="error"><strong>Widget failed to render</strong><br>' +
+            '<code>' + (label || 'unknown error') + '</code>' +
+            (detail ? '<span class="src">' + detail + '</span>' : '') +
+            '</div>';
+        }
+        console.error('[mcp-app:render_failed]', { uri: URI, error: label, detail: detail || null });
+      }
+      window.addEventListener('error', function (e) {
+        var msg = (e.error && e.error.message) || e.message || 'Unknown script error';
+        var src = e.filename ? (e.filename + ':' + (e.lineno || '?')) : '';
+        showFailure(msg, src);
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var reason = e.reason;
+        var msg = (reason && reason.message) || (typeof reason === 'string' ? reason : 'Promise rejected');
+        showFailure(msg, '');
+      });
+      window.__mcpAppRenderOk = function (extra) {
+        console.info('[mcp-app:render_ok]', Object.assign({ uri: URI, timestamp: Date.now() }, extra || {}));
+      };
+    })();
+  </script>
 
   <script type="module">
     // ``?bundle`` forces esm.sh to inline all transitive deps (zod, etc.)
@@ -266,6 +347,10 @@ RUN_HEATMAP_HTML = """<!DOCTYPE html>
         td.addEventListener('mouseenter', (e) => showTip(e, td.dataset.tip));
         td.addEventListener('mouseleave', hideTip);
       });
+
+      if (window.__mcpAppRenderOk) {
+        window.__mcpAppRenderOk({ tasks: tasks.length, dates: dates.length, cells: cells.length });
+      }
     }
 
     async function main() {
