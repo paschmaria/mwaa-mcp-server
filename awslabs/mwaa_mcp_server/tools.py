@@ -383,12 +383,6 @@ class MWAATools:
         When ``version_number`` is omitted, Airflow returns the latest
         version (``DagVersion.get_version`` orders by id desc and limits
         to 1).
-
-        Earlier in this PR series we passed the ``file_token`` from
-        ``GET /dags/{dag_id}`` as the path parameter — Airflow then tried
-        to look it up as a dag_id, failed, and returned a misleading
-        ``version_number None was not found`` error. The single-call form
-        below is what the endpoint actually expects.
         """
         params: Dict[str, Any] = {}
         if version_number is not None:
@@ -793,9 +787,7 @@ class MWAATools:
         if "error" in result:
             return result
 
-        # Airflow's batch task-instances endpoint silently ignores
-        # ``start_date_gte`` and defaults to oldest-first ordering. Without
-        # client-side handling, the "most recent failures in the last N days"
+        # Without client-side handling, the "most recent failures in the last N days"
         # contract is broken — callers got months-old failures instead of
         # the recent ones they asked for. Filter + sort here so the surface
         # behavior matches the docstring.
@@ -1019,13 +1011,7 @@ class MWAATools:
         limit: Optional[int] = 100,
         offset: Optional[int] = 0,
     ) -> Dict[str, Any]:
-        """Get import errors via Airflow API.
-
-        Airflow 3.x moved this from ``/dags/importErrors`` to the top-level
-        ``/importErrors``. The old path was being parsed as
-        ``/dags/{dag_id="importErrors"}`` and returned a 404 ``"Dag with id
-        importErrors was not found"``.
-        """
+        """Get import errors via Airflow API."""
         params: Dict[str, Any] = {"limit": limit, "offset": offset}
         return self._invoke_airflow_api(
             environment_name, "GET", "/importErrors", params=params
