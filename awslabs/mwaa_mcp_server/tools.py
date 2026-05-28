@@ -369,29 +369,29 @@ class MWAATools:
         """Get DAG details via Airflow API."""
         return self._invoke_airflow_api(environment_name, "GET", f"/dags/{dag_id}")
 
-    async def get_dag_source(self, environment_name: str, dag_id: str) -> Dict[str, Any]:
-        """Get DAG source code via Airflow API (Airflow 3.x two-step flow).
+    async def get_dag_source(
+        self,
+        environment_name: str,
+        dag_id: str,
+        version_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Get DAG source code via Airflow API.
 
-        This is a two-step flow: ``GET /dags/{dag_id}`` returns a ``file_token``
-        that opaquely identifies the DAG file, then ``GET /dagSources/{file_token}``
-        returns the source. We do both calls here so the public surface stays one-shot.
+        Airflow 3.x's ``GET /dagSources/{dag_id}`` takes the dag_id as the
+        path parameter (not a ``file_token`` despite the stale upstream
+        docstring) and accepts an optional ``version_number`` query param.
+        When ``version_number`` is omitted, Airflow returns the latest
+        version (``DagVersion.get_version`` orders by id desc and limits
+        to 1).
         """
-        dag_response = self._invoke_airflow_api(
-            environment_name, "GET", f"/dags/{dag_id}"
-        )
-        if "error" in dag_response:
-            return dag_response
-
-        body = dag_response.get("RestApiResponse") or {}
-        file_token = body.get("file_token")
-        if not file_token:
-            return {
-                "error": f"DAG '{dag_id}' response had no file_token",
-                "dag_id": dag_id,
-            }
-
+        params: Dict[str, Any] = {}
+        if version_number is not None:
+            params["version_number"] = version_number
         return self._invoke_airflow_api(
-            environment_name, "GET", f"/dagSources/{file_token}"
+            environment_name,
+            "GET",
+            f"/dagSources/{dag_id}",
+            params=params,
         )
 
     async def trigger_dag_run(
@@ -593,8 +593,11 @@ class MWAATools:
         body = raw.get("RestApiResponse") or {}
         instances = body.get("task_instances", []) or []
 
-        # Without a client-side filter the heatmap returns the 
-        # full history of the DAG instead of the requested window.
+        # Airflow's batch task-instances endpoint silently ignores
+        # ``start_date_gte`` (same bug class as list_recent_failures).
+        # Without a client-side filter the heatmap returns the full
+        # history of the DAG instead of the requested window — e.g.
+        # ``days=7`` came back with cells from three months ago.
         # ``_derive_execution_date`` is used rather than ``start_date``
         # because failed-before-start task instances (queued -> failed)
         # have null start_date and would be excluded entirely; the
@@ -738,6 +741,10 @@ class MWAATools:
         if dag_id:
             # DAG runs only have ``failed`` — ``upstream_failed`` is a task
             # instance state and Airflow's validator rejects it here.
+            #
+            # Airflow's REST API silently ignores execution_date_gte on this
+            # endpoint, so we send it (in case behavior changes) AND apply a
+            # client-side filter on start_date below.
             result = await self.list_dag_runs(
                 environment_name=environment_name,
                 dag_id=dag_id,
@@ -780,7 +787,6 @@ class MWAATools:
         if "error" in result:
             return result
 
-        # Airflow's batch task-instances endpoint defaults to oldest-first ordering.
         # Without client-side handling, the "most recent failures in the last N days"
         # contract is broken — callers got months-old failures instead of
         # the recent ones they asked for. Filter + sort here so the surface
