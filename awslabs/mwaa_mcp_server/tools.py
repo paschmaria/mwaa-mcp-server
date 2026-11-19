@@ -506,6 +506,38 @@ class MWAATools:
             environment_name, "POST", f"/dags/{dag_id}/dagRuns", json_data=data
         )
 
+    async def clear_task_instances(
+        self,
+        environment_name: str,
+        dag_id: str,
+        dag_run_id: str,
+        task_ids: List[str],
+        include_downstream: bool = False,
+        include_upstream: bool = False,
+        include_future: bool = False,
+        include_past: bool = False,
+        only_failed: bool = True,
+        reset_dag_runs: bool = True,
+        dry_run: bool = True,
+    ) -> Dict[str, Any]:
+        """Clear task instances of one DAG run via Airflow API."""
+        self._check_readonly("clear_task_instances")
+
+        data: Dict[str, Any] = {
+            "dry_run": dry_run,
+            "dag_run_id": dag_run_id,
+            "task_ids": task_ids,
+            "include_downstream": include_downstream,
+            "include_upstream": include_upstream,
+            "include_future": include_future,
+            "include_past": include_past,
+            "only_failed": only_failed,
+            "reset_dag_runs": reset_dag_runs,
+        }
+        return self._invoke_airflow_api(
+            environment_name, "POST", f"/dags/{dag_id}/clearTaskInstances", json_data=data
+        )
+
     async def get_dag_run(
         self, environment_name: str, dag_id: str, dag_run_id: str
     ) -> Dict[str, Any]:

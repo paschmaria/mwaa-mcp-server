@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `list_task_instances` now accepts an `order_by` parameter (default `-start_date`). The default flips the underlying Airflow endpoint from oldest-first to newest-first, matching the behavior callers expect for diagnostic queries. The `summary` and the `next_resource_uri` for follow-up pages both echo the applied `order_by`.
 
 ### Added
+- `clear_task_instances` tool: clears task instances of a DAG run (the Airflow UI Clear action) with `include_downstream`, `include_upstream`, `include_future`, `include_past`, `only_failed` and `reset_dag_runs`. Defaults to `dry_run=True` and is blocked when `MWAA_MCP_READONLY` is true.
 - 6 new tests covering the two Airflow 3.x endpoint shifts and the `order_by` default (including a guard that `list_recent_failures` task-instance mode passes it through).
 
 ## [0.2.0] - 2026-05-27

@@ -1,5 +1,7 @@
 """Tests for MWAA MCP Server."""
 
+import json
+
 import pytest
 from botocore.exceptions import ClientError
 from unittest.mock import Mock, patch
@@ -152,6 +154,11 @@ class TestReadonlyMode:
         with pytest.raises(PermissionError, match="not allowed in read-only mode"):
             await readonly_tools.trigger_dag_run("env", "dag_id")
 
+    @pytest.mark.asyncio
+    async def test_clear_task_instances_blocked(self, readonly_tools):
+        with pytest.raises(PermissionError, match="not allowed in read-only mode"):
+            await readonly_tools.clear_task_instances("env", "dag_id", "run1", ["t1"])
+
 
 class TestTokenCreation:
     """Test CLI and web login token creation."""
@@ -225,6 +232,40 @@ class TestAirflowApiTools:
         call_args = mock_boto_client.invoke_rest_api.call_args
         assert call_args.kwargs["Method"] == "POST"
         assert "/dags/test_dag/dagRuns" in call_args.kwargs["Path"]
+
+    @pytest.mark.asyncio
+    async def test_clear_task_instances_defaults_to_dry_run(self, mwaa_tools, mock_boto_client):
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {"task_instances": []},
+            "RestApiStatusCode": 200,
+        }
+
+        await mwaa_tools.clear_task_instances("test-env", "test_dag", "run1", ["t1"])
+
+        call_args = mock_boto_client.invoke_rest_api.call_args
+        assert call_args.kwargs["Method"] == "POST"
+        assert call_args.kwargs["Path"] == "/dags/test_dag/clearTaskInstances"
+        body = json.loads(call_args.kwargs["Body"])
+        assert body["dry_run"] is True
+        assert body["only_failed"] is True
+        assert body["include_downstream"] is False
+        assert body["dag_run_id"] == "run1"
+        assert body["task_ids"] == ["t1"]
+
+    @pytest.mark.asyncio
+    async def test_clear_task_instances_downstream_apply(self, mwaa_tools, mock_boto_client):
+        mock_boto_client.invoke_rest_api.return_value = {
+            "RestApiResponse": {"task_instances": []},
+            "RestApiStatusCode": 200,
+        }
+
+        await mwaa_tools.clear_task_instances(
+            "test-env", "test_dag", "run1", ["t1"], include_downstream=True, dry_run=False
+        )
+
+        body = json.loads(mock_boto_client.invoke_rest_api.call_args.kwargs["Body"])
+        assert body["dry_run"] is False
+        assert body["include_downstream"] is True
 
     @pytest.mark.asyncio
     async def test_get_task_logs(self, mwaa_tools, mock_boto_client):
