@@ -350,6 +350,56 @@ async def trigger_dag_run(
     return await tools.trigger_dag_run(environment_name, dag_id, dag_run_id, conf, note)
 
 
+@mcp.tool(name="clear_task_instances")
+async def clear_task_instances(
+    environment_name: str,
+    dag_id: str,
+    dag_run_id: str,
+    task_ids: List[str],
+    include_downstream: bool = False,
+    include_upstream: bool = False,
+    include_future: bool = False,
+    include_past: bool = False,
+    only_failed: bool = True,
+    reset_dag_runs: bool = True,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Clear task instances in a DAG run so they re-run (the Airflow UI "Clear" action).
+
+    Defaults to ``dry_run=True``, which only lists the task instances that would be
+    cleared. Call again with ``dry_run=False`` to apply. Requires MWAA_MCP_READONLY=false.
+
+    Args:
+        environment_name: Name of the MWAA environment
+        dag_id: The DAG ID
+        dag_run_id: The DAG run whose task instances are cleared
+        task_ids: Task IDs to clear (include task group prefixes, e.g. "group.task.run")
+        include_downstream: Also clear tasks downstream of task_ids
+        include_upstream: Also clear tasks upstream of task_ids
+        include_future: Also clear matching tasks in later DAG runs
+        include_past: Also clear matching tasks in earlier DAG runs
+        only_failed: Only clear task instances in failed or upstream_failed state
+        reset_dag_runs: Set the DAG run back to running
+        dry_run: If true (default), return the affected task instances without clearing
+
+    Returns:
+        Dictionary containing the cleared (or, for a dry run, affected) task instances
+    """
+    return await tools.clear_task_instances(
+        environment_name,
+        dag_id,
+        dag_run_id,
+        task_ids,
+        include_downstream=include_downstream,
+        include_upstream=include_upstream,
+        include_future=include_future,
+        include_past=include_past,
+        only_failed=only_failed,
+        reset_dag_runs=reset_dag_runs,
+        dry_run=dry_run,
+    )
+
+
 @mcp.tool(name="get_dag_run")
 async def get_dag_run(
     environment_name: str,
